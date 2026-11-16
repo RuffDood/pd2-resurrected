@@ -14,8 +14,11 @@
 //   D2R's, in WeaponDamage's roll block (a byte patch calling WeaponStrike) and D2R's missile roll.
 // - op bases, life steal cap and crushing blow (IR3): equipped_eth / missing_hp kept as base stats from the stat
 //   callback, lifedrain_percentcap on D2R's add-life, PD2's blow in CrushingBlowApply's jump slot, and its roll on
-//   D2RCore's event dispatch, where PD2's open wounds and deep wounds (event 15) run too.
+//   HitEvents' event 5/6 calls, where PD2's open wounds and deep wounds (event 15) run too.
 #include "item_rules.h"
+
+#define NOMINMAX
+#include <windows.h>
 
 #include "pd2_engine.h"
 #include "rathma_pair.h"
@@ -211,11 +214,24 @@ auto MissileStrike(Unit* unit, Unit* weapon) noexcept -> uint64_t {
 using MissileRollFn = uint64_t (*)(Unit*, Unit*) noexcept;
 MissileRollFn g_missileRollOriginal = nullptr;  // not called: PD2's roll replaces D2R's
 
-// WeaponCritBlock's new bytes: mov rcx,rsi / mov rdx,rdi / mov r8d,r14d / mov rax,WeaponStrike / call rax /
-// jmp WeaponCritBlockEnd / nop nop. The block's own volatile registers are set again after 0x44c3d9.
-auto WeaponCritPatch(uint8_t (&out)[28]) noexcept -> void {
-	using namespace d2r::rva;
-	static_assert(sizeof(WeaponCritBlockBytes) == 28);
+// WeaponDamage's roll block, found by signature (93847: 0x44c2b4 / 0x44c320 / 0x44c3d9). Cast Triggers byte-checks
+// 0x44c2a4..0x44c2b8 (its measurement site), so the head is left stock but for the two bytes at +5: a short jump (EB 65)
+// to the stub, which sits over the a5 != 0 path's first 28 bytes (the block's `jne` lands there). Both paths now run
+// WeaponStrike (#385).
+sigscan::Entry CritHead {"WeaponCritHead", "crit", sigscan::Kind::Code, 0, 0,
+                         "45 85 f6 75 67 48 8b ce e8 ?? ?? ?? ?? 48 85 c0 74 5a 45 8d 4e 02 45 33 c0 48 8b d0"};
+sigscan::Entry CritStub {"WeaponCritStub", "crit", sigscan::Kind::Code, 0, 0,
+                         "45 33 c0 ba 51 01 00 00 48 8b ce e8 ?? ?? ?? ?? 8b d8 85 c0 7e 3e 48 8b ce e8"};
+sigscan::Entry CritEnd {"WeaponCritEnd", "crit", sigscan::Kind::Code, 0, 0, "8b 6f 20 45 33 c0 48 8b ce 41 8d 50 31"};
+sigscan::Entry* const CritOwn[] = {&CritHead, &CritStub, &CritEnd};
+constexpr uint8_t CritHeadJoin[] = {0x48, 0x8b};  // mov rcx,rsi's first two bytes, at CritHead + 5
+constexpr int CritHeadJoinAt = 5;
+constexpr uint8_t CritStubStock[28] = {0x45, 0x33, 0xc0, 0xba, 0x51, 0x01, 0x00, 0x00, 0x48, 0x8b, 0xce, 0xe8, 0xf0, 0x8c,
+                                       0xea, 0xff, 0x8b, 0xd8, 0x85, 0xc0, 0x7e, 0x3e, 0x48, 0x8b, 0xce, 0xe8, 0xa2, 0xde};
+
+// The stub: mov rcx,rsi / mov rdx,rdi / mov r8d,r14d / mov rax,WeaponStrike / call rax / jmp CritEnd / nop nop.
+// The block's own volatile registers are set again after CritEnd.
+auto WeaponCritPatch(uint8_t (&out)[28], uint64_t stub, uint64_t end) noexcept -> void {
 	const uint8_t head[] = {0x48, 0x8b, 0xce, 0x48, 0x8b, 0xd7, 0x45, 0x8b, 0xc6, 0x48, 0xb8};
 	std::memcpy(out, head, sizeof(head));
 	const uint64_t target = reinterpret_cast<uint64_t>(&WeaponStrike);
@@ -223,10 +239,30 @@ auto WeaponCritPatch(uint8_t (&out)[28]) noexcept -> void {
 	out[19] = 0xff;
 	out[20] = 0xd0;
 	out[21] = 0xe9;
-	const int32_t rel = static_cast<int32_t>(WeaponCritBlockEnd - (WeaponCritBlock + 26));
+	const int32_t rel = static_cast<int32_t>(end - (stub + 26));
 	std::memcpy(out + 22, &rel, 4);
 	out[26] = 0x90;
 	out[27] = 0x90;
+}
+
+// The two writes: the jump at CritHead + 5, then the stub. False (nothing written) when a signature is off, the three
+// are not the layout the jump encodes (stub = head + 0x6c), or either site's bytes differ.
+auto PatchWeaponCrit(const D2RL::PluginContext* context) noexcept -> bool {
+	sigscan::Resolve(CritOwn, std::size(CritOwn), context->exeBase, nullptr, 0);
+	for (const sigscan::Entry* e : CritOwn) {
+		if (e->state != sigscan::State::Ok) {
+			return false;
+		}
+	}
+	constexpr uint8_t Jump[] = {0xeb, 0x65};  // 0x44c2b9 + 2 + 0x65 = 0x44c320
+	if (CritStub.rva != CritHead.rva + 0x6c || CritEnd.rva != CritHead.rva + 0x125) {
+		return false;
+	}
+	uint8_t stub[28];
+	WeaponCritPatch(stub, CritStub.rva, CritEnd.rva);
+	// the stub first: alone it is harmless (the a5 != 0 path), and the jump is the only way into it for a5 == 0
+	return context->PatchBytes(CritStub.rva, CritStubStock, sizeof(CritStubStock), stub, sizeof(stub)) &&
+	       context->PatchBytes(CritHead.rva + CritHeadJoinAt, CritHeadJoin, sizeof(CritHeadJoin), Jump, sizeof(Jump));
 }
 
 // --- Op bases (IR3): PD2's 0x102fa640 computes two stats no one sets, for ops 4 / 5 (item_dmgpercent_pereth,
@@ -496,21 +532,25 @@ constexpr uint16_t NoEvent = 0xffff;  // no event raises it
 
 std::atomic<uint32_t> g_blowRolls {0};
 
-using DispatchFn = void (*)(Game*, int32_t, Unit*, Unit*, void*, void*) noexcept;
-DispatchFn g_dispatchOriginal = nullptr;
+// D2R's unit-stat event function (93847: 0x44d570; game, event, attacker, target, damage), which HitEvents (0x44ce80)
+// calls for events 5 and 6 and which reaches D2RCore's dispatcher through the 0x5881e0 thunk and its slot. Taken from
+// the two call sites' own rel32 (below), not a fixed address.
+using HitEventFn = int32_t (*)(Game*, int32_t, Unit*, Unit*, void*) noexcept;
+HitEventFn g_hitEventOriginal = nullptr;
 
 // PD2's open wounds (below): item_openwounds and map_mon_openwounds nodes are hidden the same way
 constexpr uint32_t StatOpenWounds = 135;     // item_openwounds
 constexpr uint32_t StatMapOpenWounds = 460;  // map_mon_openwounds (PD2 407), the same event
 auto OpenWounds(Game* game, Unit* unit, Unit* target, uint32_t stat) noexcept -> void;
-thread_local int32_t t_hiddenEvent = -1;  // the event whose nodes an outer DispatchEvent on this thread has hidden
+thread_local int32_t t_hiddenEvent = -1;  // the event whose nodes an outer HitEvent on this thread has hidden
 
-auto DispatchEvent(Game* game, int32_t event, Unit* unit, Unit* target, void* damage, void* list) noexcept -> void {
+// Called in place of D2R's unit-stat event function at HitEvents' two calls that raise events 5 and 6 (relayed by
+// PatchHitEvents). Not the dispatch slot: Cast Triggers requires D2RCore's own dispatcher there (#385).
+auto HitEvent(Game* game, int32_t event, Unit* unit, Unit* target, void* damage) noexcept -> int32_t {
 	using namespace d2r::rva;
 	if ((event != EventMeleeDamage && event != EventMissileDamage) || game == nullptr || unit == nullptr ||
 	    target == nullptr || damage == nullptr) {
-		g_dispatchOriginal(game, event, unit, target, damage, list);
-		return;
+		return g_hitEventOriginal(game, event, unit, target, damage);
 	}
 	uint8_t* hidden[MaxHiddenNodes];
 	uint32_t woundStats[MaxHiddenNodes];
@@ -541,7 +581,7 @@ auto DispatchEvent(Game* game, int32_t event, Unit* unit, Unit* target, void* da
 	if (count != 0) {
 		t_hiddenEvent = event;
 	}
-	g_dispatchOriginal(game, event, unit, target, damage, list);
+	const int32_t result = g_hitEventOriginal(game, event, unit, target, damage);
 	t_hiddenEvent = outerHidden;
 	for (int i = 0; i < count; ++i) {
 		*reinterpret_cast<uint16_t*>(hidden[i] + EventNodeEvent) = static_cast<uint16_t>(event);
@@ -553,13 +593,13 @@ auto DispatchEvent(Game* game, int32_t event, Unit* unit, Unit* target, void* da
 	}
 	const int32_t chance = Stat(unit, StatCrushingBlow) + HandStatSum(unit, StatCrushingBlow);
 	if (chance <= 0 || d2r::Engine<int32_t (*)(Unit*) noexcept>(UnitDead)(target) != 0) {
-		return;
+		return result;
 	}
 	void* current = d2r::Engine<void* (*)(Unit*) noexcept>(CurrentSkill)(unit);
 	if (current != nullptr &&
 	    d2r::Engine<int32_t (*)(const void*, const char*, int32_t) noexcept>(UnitSkillId)(current, __FILE__, __LINE__) ==
 	        SkillSmite) {
-		return;
+		return result;
 	}
 	const int32_t roll = static_cast<int32_t>(d2r::RandomBelow(d2r::Engine<uint32_t* (*)(Unit*) noexcept>(UnitSeed)(unit), 100));
 	const uint32_t n = ++g_blowRolls;
@@ -571,6 +611,106 @@ auto DispatchEvent(Game* game, int32_t event, Unit* unit, Unit* target, void* da
 		d2r::CrushingBlowArgs args {damage, {4, 10, 10}, static_cast<uint8_t>(event == EventMissileDamage ? 1 : 0)};
 		CrushingBlow(game, unit, target, &args);
 	}
+	return result;
+}
+
+// HitEvents' two calls to the event function, found by their argument set-up (event 6 missile, event 5 melee; 93847:
+// 0x44cfc5 and 0x44cfe4), each followed by `E8 rel32`.
+sigscan::Entry HitMissileCall {"HitEventMissile", "hitevent", sigscan::Kind::Code, 0, 0,
+                               "4c 8b ce 48 89 7c 24 20 4d 8b c6 ba 06 00 00 00 49 8b cf e8 ?? ?? ?? ??"};
+sigscan::Entry HitMeleeCall {"HitEventMelee", "hitevent", sigscan::Kind::Code, 0, 0,
+                             "4c 8b ce 48 89 7c 24 20 4d 8b c6 ba 05 00 00 00 49 8b cf e8 ?? ?? ?? ??"};
+sigscan::Entry* const HitOwn[] = {&HitMissileCall, &HitMeleeCall};
+constexpr int HitCallAt = 19;  // the E8 inside the match
+
+// A 14-byte `jmp [rip+0]; &HitEvent` within +-2 GB of the image: a rel32 call reaches it, which the SDK's
+// PatchCallRel32 cannot target (plugin memory). No SDK service covers unit events (#385), so the two calls are
+// rewritten with the MutationService's byte patch (PatchBytes), as Cast Triggers does for its own relays.
+auto AllocateRelay(uint64_t image) noexcept -> uint8_t* {
+	// From the far ends of the window, so the near range stays free for other plugins' relays (Cast Triggers'
+	// allocation failed intermittently when this took a block next to the image).
+	SYSTEM_INFO info;
+	GetSystemInfo(&info);
+	const uint64_t step = info.dwAllocationGranularity;
+	const uint64_t reach = 0x70000000ull;
+	const uint64_t low = image > reach ? image - reach : step;
+	for (uint64_t at = (low + step - 1) & ~(step - 1); at < image; at += step) {
+		if (void* p = VirtualAlloc(reinterpret_cast<void*>(at), 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
+			return static_cast<uint8_t*>(p);
+		}
+	}
+	for (uint64_t at = (image + reach) & ~(step - 1); at > image; at -= step) {
+		if (void* p = VirtualAlloc(reinterpret_cast<void*>(at), 0x1000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE)) {
+			return static_cast<uint8_t*>(p);
+		}
+	}
+	return nullptr;
+}
+
+// Both calls or neither: one MutationService transaction checks and writes both, and restores both on a failure.
+auto PatchHitEvents(const D2RL::PluginContext* context) noexcept -> bool {
+	sigscan::Resolve(HitOwn, std::size(HitOwn), context->exeBase, nullptr, 0);
+	if (HitMissileCall.state != sigscan::State::Ok || HitMeleeCall.state != sigscan::State::Ok) {
+		return false;
+	}
+	const uint64_t sites[2] = {HitMissileCall.address + HitCallAt, HitMeleeCall.address + HitCallAt};
+	uint8_t stock[2][5];
+	uint64_t target[2];
+	for (int i = 0; i < 2; ++i) {
+		std::memcpy(stock[i], reinterpret_cast<const void*>(sites[i]), 5);
+		int32_t rel;
+		std::memcpy(&rel, stock[i] + 1, 4);
+		target[i] = sites[i] + 5 + static_cast<int64_t>(rel);
+	}
+	if (target[0] != target[1]) {
+		return false;
+	}
+	const D2RL::MutationService* mutations = nullptr;
+	if (context->QueryService(&mutations) != D2RL::ServiceQueryResult::Success ||
+	    !D2RL::HasMutationServiceField(mutations, D2RL::MutationServiceRequiredSize)) {
+		return false;
+	}
+	uint8_t* relay = AllocateRelay(context->exeBase);
+	if (relay == nullptr) {
+		return false;
+	}
+	const uint64_t entry = reinterpret_cast<uint64_t>(&HitEvent);
+	const uint8_t jump[6] = {0xff, 0x25, 0, 0, 0, 0};
+	std::memcpy(relay, jump, sizeof(jump));
+	std::memcpy(relay + sizeof(jump), &entry, 8);
+	DWORD old;
+	uint8_t call[2][5] = {{0xe8}, {0xe8}};
+	bool ok = VirtualProtect(relay, 0x1000, PAGE_EXECUTE_READ, &old) != 0;
+	for (int i = 0; ok && i < 2; ++i) {
+		const int64_t rel = static_cast<int64_t>(reinterpret_cast<uint64_t>(relay)) - static_cast<int64_t>(sites[i] + 5);
+		const int32_t rel32 = static_cast<int32_t>(rel);
+		ok = rel == rel32;
+		std::memcpy(call[i] + 1, &rel32, 4);
+	}
+	D2RL::Mutations::TransactionHandle transaction = 0;
+	ok = ok && mutations->beginTransaction(context, &transaction) == D2RL::Mutations::Result::Success;
+	if (!ok) {
+		VirtualFree(relay, 0, MEM_RELEASE);
+		return false;
+	}
+	g_hitEventOriginal = reinterpret_cast<HitEventFn>(target[0]);  // before any call can reach HitEvent
+	D2RL::Mutations::CommitResult result{.structSize = D2RL::Mutations::CommitResultSize};
+	for (int i = 0; ok && i < 2; ++i) {
+		const D2RL::Mutations::BytePatchRequest patch{.structSize = D2RL::Mutations::BytePatchRequestSize,
+		                                              .rva = sites[i] - context->exeBase,
+		                                              .expected = stock[i],
+		                                              .expectedSize = 5,
+		                                              .bytes = call[i],
+		                                              .size = 5};
+		D2RL::Mutations::OperationHandle operation = 0;
+		ok = mutations->stageBytePatch(context, transaction, &patch, &operation) == D2RL::Mutations::Result::Success;
+	}
+	if (!ok || mutations->commit(context, transaction, &result) != D2RL::Mutations::Result::Success) {
+		mutations->cancelTransaction(context, transaction);
+		VirtualFree(relay, 0, MEM_RELEASE);
+		return false;
+	}
+	return true;
 }
 
 // --- Open wounds (IR3): PD2's event 15 (0x103463f0) in place of D2R's ----------------------------------------------
@@ -1534,18 +1674,10 @@ auto InstallItemRules(const D2RL::PluginContext* context, char* report, size_t r
 	                      context->PatchWriteU64(PropertyFuncTable + static_cast<uint64_t>(PropertySlot) * 8, Empty,
 	                                             sizeof(Empty),
 	                                             reinterpret_cast<uint64_t>(static_cast<PropertyFn>(PropSorcSkillRandCtc)));
-	uint8_t critPatch[28];
-	WeaponCritPatch(critPatch);
-	const bool weaponStrike = context->PatchBytes(WeaponCritBlock, WeaponCritBlockBytes, sizeof(WeaponCritBlockBytes),
-	                                              critPatch, sizeof(critPatch));
+	const bool weaponStrike = PatchWeaponCrit(context);
 	const bool missileStrike = context->InstallInlineHook(MissileCritRoll, MissileCritRollEntry,
 	                                                      sizeof(MissileCritRollEntry), MissileStrike, &g_missileRollOriginal);
-	// D2RCore's event dispatcher is in the slot; the wrapper calls it
-	g_dispatchOriginal = *reinterpret_cast<DispatchFn const*>(d2r::imageBase + EventDispatchSlot);
-	const uint64_t dispatchSlot = reinterpret_cast<uint64_t>(g_dispatchOriginal);
-	const bool blowRoll = dispatchSlot != 0 &&
-	                      context->PatchWriteU64(EventDispatchSlot, &dispatchSlot, sizeof(dispatchSlot),
-	                                             reinterpret_cast<uint64_t>(static_cast<DispatchFn>(DispatchEvent)));
+	const bool blowRoll = PatchHitEvents(context);
 	const bool lifeCap = context->InstallInlineHook(AddLife, AddLifeEntry, sizeof(AddLifeEntry),
 	                                                CappedAddLife, &g_addLifeOriginal);
 	// The slot holds whatever the image or D2RCore put there; PD2's blow replaces it whole, so it is not kept
@@ -1575,7 +1707,7 @@ auto InstallItemRules(const D2RL::PluginContext* context, char* report, size_t r
 	              "replenish charges%s; unlimited books%s",
 	              PropertySlot, property ? "" : " FAILED (slot not empty)",
 	              weaponStrike ? "" : " FAILED (bytes differ)", missileStrike ? "" : " FAILED (bytes differ)",
-	              blowRoll ? "" : " FAILED (slot write)", lifeCap ? "" : " FAILED (bytes differ)",
+	              blowRoll ? "" : " FAILED (call sites)", lifeCap ? "" : " FAILED (bytes differ)",
 	              blow ? "" : " FAILED (slot write)", curses ? "" : " FAILED (bytes differ)",
 	              equip ? "" : " FAILED (bytes differ)", replenish ? "" : " FAILED (bytes differ)",
 	              unlimited ? "" : " FAILED (entries not empty, or no mutation service)");
