@@ -46,8 +46,8 @@ std::atomic<uint32_t> g_rolls {0};
 
 // PD2's unlimited books (spell 13, ProjectDiablo.dll): the Horadric Navigator (rtp) opens a town portal and the
 // Horadric Almanac (rid) identifies every item at once, and neither is used up. The merge moves them to item spells 17
-// and 18 (tools/pd2_ids.py FIXES): 17 runs D2R's own Town Portal (entry 2); 18 has no check or use of its own, and
-// core-maps' item spell hooks identify all (d2r::rva::UnlimitedIdentifySpell).
+// and 18 (tools/pd2_ids.py FIXES): 17 runs D2R's own Town Portal (entry 2); 18 has no check of its own and its use is
+// the Almanac's handler in use slot 14 (almanac.cpp), which identifies all.
 constexpr int32_t UnlimitedPortalCheck = 2, UnlimitedPortalUse = 2;
 
 using SetStatFn = int32_t (*)(uint8_t dataFlag, uint32_t a1, uint64_t a2, Unit* item, const void* property, uint8_t set,
@@ -641,7 +641,7 @@ auto OwnedByPlayer(Game* game, Unit* unit) noexcept -> bool {
 //   stack; at 3 it only refreshes the time (NewStateList keeps an older list of the same skill and level).
 // shortcut: PD2 keys the list by attacker (0x102fc880), so two attackers stack apart; D2R keeps one open wounds list
 // per unit, which all attackers share. Not ported: no damage to a player inside PD2's levels 157, 159, 166 (not in
-// the merged data), Rathma's two clones splitting it (core-maps' rathma_life.cpp owns the pair) and PD2's damage
+// the merged data), Rathma's two clones splitting it (core-events' rathma_life.cpp owns the pair) and PD2's damage
 // meter.
 auto OpenWounds(Game* game, Unit* unit, Unit* target, uint32_t stat) noexcept -> void {
 	using namespace d2r::rva;
@@ -975,7 +975,7 @@ auto DarkPactOne(d2r::AreaContext* area, Unit* victim) noexcept -> int32_t {
 	d2r::Engine<void (*)(Game*, Unit*, Unit*, void*) noexcept>(d2r::rva::AreaApply)(static_cast<Game*>(area->game),
 	                                                                               area->unit, victim, &damage);
 	++hit->victims;
-	d2r::ReleaseDamage(damage);
+	d2r::ReleaseDamageRva(damage);
 	return 1;
 }
 
@@ -1063,7 +1063,7 @@ auto ApplyDarkPact(Unit* target, d2r::CurseParams* params, uint32_t dataFlag) no
 		d2r::AreaCenter center {d2r::Engine<void* (*)(Unit*) noexcept>(UnitRoom)(target), x, y};
 		d2r::Engine<AreaFn>(AreaUnits)(game, caster, &center, radius, AreaUnitMask, DarkPactOne, &hit, 0);
 		victims = hit.victims;
-		d2r::ReleaseDamage(rolled);
+		d2r::ReleaseDamageRva(rolled);
 	}
 	// dark_pact itself, past the max-curses rule: NewStateList sees only an older dark_pact list, if any
 	uint8_t* same = stateList(target, StateDarkPact);
@@ -1466,7 +1466,7 @@ static auto PatchUnlimitedBooks(const D2RL::PluginContext* context) noexcept -> 
 		return false;
 	}
 	static constexpr uint8_t Empty[2 * ItemSpellEntrySize] = {};
-	static constexpr int32_t Books[2 * 3] = {UnlimitedPortalCheck, UnlimitedPortalUse, 1, 0, 0, 1};
+	static constexpr int32_t Books[2 * 3] = {UnlimitedPortalCheck, UnlimitedPortalUse, 1, 0, AlmanacUseSlot, 1};
 	static_assert(sizeof(Books) == sizeof(Empty));
 	const D2RL::Mutations::BytePatchRequest patch{
 		.structSize = D2RL::Mutations::BytePatchRequestSize,
@@ -1533,7 +1533,7 @@ auto InstallItemRules(const D2RL::PluginContext* context, char* report, size_t r
 	                       context->InstallInlineHook(ReplenishEvent, ReplenishEventEntry, sizeof(ReplenishEventEntry),
 	                                                  ChargesReplenishEvent, &g_replenishEventOriginal);
 	// Unlimited books (IR5): D2R's item spell table is data; its free entry 17 gets the Town Portal handlers and 18
-	// none (core-maps' hooks identify all), both with keep 1, so the book stays after its use
+	// none (core-events' hooks identify all), both with keep 1, so the book stays after its use
 	const bool unlimited = PatchUnlimitedBooks(context);
 	std::snprintf(report, reportSize, "property func %d ormus%s; weapon strike%s; missile strike%s; "
 	              "crushing blow roll%s; life steal cap%s; crushing blow%s; curses%s; skill on equip and op bases%s; "

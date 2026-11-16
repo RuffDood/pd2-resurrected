@@ -447,7 +447,7 @@ class ItemTableTests(unittest.TestCase):
 
     def test_pd2_portal_operate_takes_slot_60(self):
         # PD2's portal operate 77 (grey re-entry portals and the other xactportals) takes D2R's free operate slot 60,
-        # which core-maps fills (UB2); D2R's own 15 stays
+        # which core-events fills (UB2); D2R's own 15 stays
         merged = I.merge_table("objects", table("Name|OperateFn\nxactportal_grey|77\nPortal|15\n"),
                                table("Name|OperateFn\n"), [("xactportal_grey", 0, "xactportal_grey"),
                                                            ("Portal", 1, "Portal")], {}, {})[0]
@@ -521,6 +521,17 @@ class ListFileTests(unittest.TestCase):
             out = root / "out"
             I.apply(root / "merge" / "ids-skills.tsv", root / "pd2", root / "d2r", out)
             self.assertEqual((out / "global/excel/skills.txt").read_text("latin-1"), "name\nA\nB\n")
+
+
+class FixLevelsTests(unittest.TestCase):
+    def test_entry_key_keeps_letters_and_digits(self):
+        self.assertEqual(I.entry_key("Na-Krul's Abyss 2"), "EnteringNaKrulsAbyss2")
+
+    def test_fix_levels_keys_pd2_rows_only_and_clamps_the_type(self):
+        lv = table("LevelName|LevelEntry|LevelType\nD2R One||99\nPD2 Two||36\nPD2 Three|Kept|35\nPD2 Four||37")
+        I.fix_levels(lv, 1, 35)
+        self.assertEqual([r[1] for r in lv.rows], ["", "EnteringPD2Two", "Kept", "EnteringPD2Four"])
+        self.assertEqual([r[2] for r in lv.rows], ["99", "0", "35", "0"])
 
 
 if __name__ == "__main__":

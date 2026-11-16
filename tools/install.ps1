@@ -33,7 +33,7 @@ if (Get-Process D2R, D2RLoader -ErrorAction SilentlyContinue | Where-Object { $_
 
 $plugins = Join-Path $Game "d2rloader\plugins"
 New-Item -ItemType Directory -Force $plugins | Out-Null
-foreach ($name in @("core-rules", "core-maps", "core-ui")) {
+foreach ($name in @("core-rules", "core-events", "core-ui")) {
     $dll = Join-Path $PSScriptRoot "..\plugin\build\Release\$name.dll"
     if (-not (Test-Path $dll)) { throw "$dll missing: run plugin\build.ps1 first" }
     Copy-Item $dll $plugins -Force
@@ -41,7 +41,8 @@ foreach ($name in @("core-rules", "core-maps", "core-ui")) {
 }
 
 # Strays (third-party plugins, D2RLoader companions) would make the test run on an unclean install: move, never delete.
-$ours = @("core-rules.dll", "core-maps.dll", "core-ui.dll", "test-harness.dll", "d2r-testharness-console.txt")
+# cartographer.dll is the required native-map plugin on this branch: install.ps1 does not copy it, the slot must already hold it (d2r-tools build).
+$ours = @("core-rules.dll", "core-events.dll", "core-ui.dll", "cartographer.dll", "test-harness.dll", "d2r-testharness-console.txt")
 $strays = @(Get-ChildItem $plugins -Force | Where-Object { $ours -notcontains $_.Name })
 if ($strays -and -not $KeepExtras) {
     $backup = Join-Path "C:\D2RTestSlots\backups\stray-plugins-$(Get-Date -Format yyyy-MM-dd)" (Split-Path $Game -Leaf)
@@ -51,6 +52,18 @@ if ($strays -and -not $KeepExtras) {
         if (Test-Path $dest) { $dest = Join-Path $backup "$($f.BaseName)-$(Get-Date -Format HHmmss)$($f.Extension)" }
         Move-Item -LiteralPath $f.FullName $dest
         Write-Output "moved stray $($f.Name) -> $dest"
+    }
+}
+
+# Plugins are game-wide: our plugin DLLs (core-*, cartographer; companions stay) left in <Game>\mods\<mod>\d2rloader\plugins shadows the fresh install (#970): move it too.
+$repoMod = (Get-Content (Join-Path $PSScriptRoot "..\mod.json") -Raw | ConvertFrom-Json).name
+$stale = @(Get-ChildItem (Join-Path $Game "mods\$repoMod\d2rloader\plugins") -ErrorAction SilentlyContinue | Where-Object { $_.Name -like "core-*.dll" -or $_.Name -eq "cartographer.dll" })
+if ($stale) {
+    $backup = Join-Path "C:\D2RTestSlots\backups\stale-mod-plugins-$(Get-Date -Format yyyy-MM-dd-HHmmss)" (Split-Path $Game -Leaf)
+    New-Item -ItemType Directory -Force $backup | Out-Null
+    foreach ($f in $stale) {
+        Move-Item -LiteralPath $f.FullName (Join-Path $backup $f.Name) -Force
+        Write-Output "moved stale mod plugin $($f.Name) -> $backup"
     }
 }
 
@@ -79,6 +92,14 @@ if ($Data) {
             if ($LASTEXITCODE -ne 0) { throw "modkit install failed ($LASTEXITCODE)" }
         }
     } finally { Pop-Location }
+    # Cartographer's cube signatures beside its tables keep the cube executor with core-rules (#987); companions.py overlay() does the same.
+    $sig = Join-Path $PSScriptRoot "..\companions\cartographer\signatures.txt"
+    if (Test-Path $sig) {
+        $tables = Join-Path $root "$mod.mpq\data\global\excel\d2rloader\cartographer"
+        New-Item -ItemType Directory -Force $tables | Out-Null
+        Copy-Item $sig $tables -Force
+        Write-Output "installed signatures.txt -> $tables"
+    }
     foreach ($f in $saved.Keys) {
         $info = Get-Content $f -Raw | ConvertFrom-Json
         $info.savepath = $saved[$f]

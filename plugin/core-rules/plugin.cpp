@@ -6,6 +6,7 @@
 // (<game>\d2rloader\config\core-rules-off.txt), which leaves listed parts out to bisect a crash.
 #include <D2RLPlugin/api.h>
 
+#include "almanac.h"
 #include "crash_guard.h"
 #include "cube_rules.h"
 #include "cube_stacks.h"
@@ -14,6 +15,7 @@
 #include "log.h"
 #include "loot_rules.h"
 #include "merc_rules.h"
+#include "socket_rules.h"
 #include "off_switch.h"
 #include "skill_functions.h"
 
@@ -73,6 +75,12 @@ void InstallCube(const D2RL::PluginContext* context, char* report, size_t size) 
 	std::snprintf(report, size, "%d/%d installed: %s", installed, CubeRuleCount(), rules);
 }
 
+void InstallAlmanacPart(const D2RL::PluginContext* context, char* report, size_t size) noexcept {
+	char rules[200] = "";
+	const int installed = InstallAlmanac(context, rules, sizeof(rules));
+	std::snprintf(report, size, "%d/1 installed: %s", installed, rules);
+}
+
 void InstallStacks(const D2RL::PluginContext* context, char* report, size_t size) noexcept {
 	char rules[200] = "";
 	const int installed = InstallCubeStacks(context, rules, sizeof(rules));
@@ -83,6 +91,12 @@ void InstallMercs(const D2RL::PluginContext* context, char* report, size_t size)
 	char rules[200] = "";
 	const int installed = InstallMercRules(context, rules, sizeof(rules));
 	std::snprintf(report, size, "%d/%d installed: %s", installed, MercRuleCount(), rules);
+}
+
+void InstallSockets(const D2RL::PluginContext* context, char* report, size_t size) noexcept {
+	char rules[200] = "";
+	const int installed = InstallSocketRules(context, rules, sizeof(rules));
+	std::snprintf(report, size, "%d/%d installed: %s", installed, SocketRuleCount(), rules);
 }
 
 void InstallLoot(const D2RL::PluginContext* context, char* report, size_t size) noexcept {
@@ -97,7 +111,9 @@ Part g_parts[] = {
 	{"mercs", InstallMercs, ""},
 	{"cube", InstallCube, ""},
 	{"stacks", InstallStacks, ""},
+	{"almanac", InstallAlmanacPart, ""},
 	{"loot", InstallLoot, ""},
+	{"sockets", InstallSockets, ""},
 };
 
 void InstallParts(const D2RL::PluginContext* context) noexcept {
@@ -150,7 +166,13 @@ auto StatusCommand(D2R::Game::Client* client, const D2RL::ConsoleCommandContext*
 	CubeStackCounters(line, sizeof(line));
 	command->plugin->WriteConsoleMessage(line);
 	plog::Info("%s", line);
+	AlmanacCounters(line, sizeof(line));
+	command->plugin->WriteConsoleMessage(line);
+	plog::Info("%s", line);
 	LootRuleCounters(line, sizeof(line));
+	command->plugin->WriteConsoleMessage(line);
+	plog::Info("%s", line);
+	SocketRuleCounters(line, sizeof(line));
 	command->plugin->WriteConsoleMessage(line);
 	plog::Info("%s", line);
 	return D2RL::ConsoleCommandResult::Handled;

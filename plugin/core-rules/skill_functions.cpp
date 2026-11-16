@@ -1154,7 +1154,7 @@ auto SplashOne(d2r::AreaContext* area, Unit* victim) noexcept -> int32_t {
 	}
 	DealSplash(game, area->unit, victim, damage);
 	hit->victims += (damage.resultFlags & ResultHit) != 0 ? 1 : 0;
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	return 1;
 }
 
@@ -1342,7 +1342,7 @@ auto HolyLightOne(d2r::AreaContext* area, Unit* victim) noexcept -> int32_t {
 	d2r::Engine<void (*)(Game*, Unit*, Unit*, void*) noexcept>(AreaApply)(static_cast<Game*>(area->game), unit, victim,
 	                                                                     &damage);
 	++hl->hit;
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	return 1;
 }
 
@@ -1421,7 +1421,7 @@ auto MeleeHit(Game* game, Unit* unit, Unit* target, const uint8_t* skill, int32_
 		                                                                                    srcDam);
 		d2r::Engine<void (*)(Game*, Unit*, Unit*, int32_t, uint8_t) noexcept>(ApplyQueuedHit)(game, unit, target, 0, 1);
 	}
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	return hit;
 }
 
@@ -1492,7 +1492,7 @@ auto RollVengeance(Game* game, Unit* unit, const uint8_t* skill, int32_t skillId
 	d2r::LeapKnockback roll;
 	d2r::Engine<void (*)(Unit*, void*, int32_t, int32_t) noexcept>(ElementalDamage)(unit, &roll, skillId, level);
 	d.base = At<int32_t>(&roll, DmgPhys);
-	ReleaseDamage(roll);
+	ReleaseDamageRva(roll);
 	for (int i = 0; i < 3; ++i) {
 		d.dmg[i] += d.base + Percent(d.base, mastery[i]);
 	}
@@ -1580,7 +1580,7 @@ auto VengeanceOne(d2r::AreaContext* area, Unit* victim) noexcept -> int32_t {
 	*reinterpret_cast<int32_t*>(block + DmgLight) = b->damage.dmg[2];
 	*reinterpret_cast<int32_t*>(block + DmgColdLength) = b->damage.coldLength;
 	d2r::Engine<void (*)(Game*, Unit*, Unit*, void*) noexcept>(AreaApply)(game, caster, victim, &damage);
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	++b->hit;
 	int32_t cx = 0, cy = 0, vx = 0, vy = 0;
 	if (d2r::Engine<int32_t (*)(Unit*, int32_t) noexcept>(UnitHasState)(victim, JustHit) != 0 ||
@@ -1761,7 +1761,7 @@ auto SrvDoDragonFlight(Game* game, Unit* unit, int32_t skillId, int32_t level) n
 		d2r::api.setUnitSkillFlag(unit, 1);
 	}
 	const uint32_t resultFlags = damage.resultFlags;
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	const bool sampleCast = plog::Sample(g_dragonFlights);
 	if ((hit && plog::Sample(g_dragonFlightHits)) || sampleCast) {
 		plog::Info("dragon flight: skill %d level %d at unit type %d: to-hit %d (progressive %d), result 0x%x, "
@@ -2956,7 +2956,7 @@ auto StaticFieldOne(d2r::AreaContext* area, Unit* victim) noexcept -> int32_t {
 	*(reinterpret_cast<uint8_t*>(&damage) + DamageFlag148) = 1;
 	d2r::Engine<void (*)(Game*, Unit*, Unit*, int32_t, void*) noexcept>(HitEvents)(game, area->unit, victim, 1, &damage);
 	d2r::Engine<void (*)(Game*, Unit*, Unit*, void*) noexcept>(DealDamage)(game, area->unit, victim, &damage);
-	ReleaseDamage(damage);
+	ReleaseDamageRva(damage);
 	if (hit->hits++ == 0) {
 		hit->life = life;
 		hit->maxLife = maxLife;
@@ -4055,9 +4055,9 @@ auto SrvStCycler(Game* game, Unit* unit, int32_t skillId, int32_t level) noexcep
 // One monster for PD2's summons (0x1038a170 with a spot search, 0x1038a0d0 without), mode 1 (neutral), at x/y in the
 // room holding x/y (room follows it). D2R native calls: PluginSDK has no server-side monster spawn (its Encounters
 // service only runs the console's test spawn for a client), so this calls D2R's RoomAtXY, FindFreeSpot and SpawnMonster.
-// Flags 0x42 are what D2R's own spawns and core-maps pass to SpawnMonster; PD2's 0xc is not a spawn flag but an
+// Flags 0x42 are what D2R's own spawns and core-events pass to SpawnMonster; PD2's 0xc is not a spawn flag but an
 // argument of its spot search (0x10389c20), and its spawn (0x1038a060) passes fixed flags to D2Game.
-// shortcut: D2R's portal spot search stands in for PD2's 0x10389c20, as core-maps' map events do; PD2's 0x3000000 unit
+// shortcut: D2R's portal spot search stands in for PD2's 0x10389c20, as core-events' map events do; PD2's 0x3000000 unit
 // flags and its D2Game call on each spawn (0x103a1eb0) are left out, as their meaning is unread
 // FindFreeSpot's other arguments, as D2R's red portal (OpenRedPortal) passes them; the names are guesses, unread
 constexpr uint32_t SpotSize = 3, SpotMask = 0x400;
@@ -4085,7 +4085,7 @@ auto SummonAt(Game* game, void*& room, int32_t x, int32_t y, int32_t mon, bool s
 }
 
 // RathmaSummon (PD2 srvdofunc 179, ProjectDiablo.dll 0x103b42a0): what Rathma's AI picked (stat 447, here 500, which
-// core-maps' rathma_ai.cpp sets before the cast) spawns, around the caster at +-20 unless noted:
+// core-events' rathma_ai.cpp sets before the cast) spawns, around the caster at +-20 unless noted:
 //   30 void golems (937): 10 / 8 / 6 / 4 below 31 / 51 / 71 / 101 % life, 40 failed spots at most
 //   31 four blood golems (938) at the stage's spot (0x103567d0) -25 x, -25 y, +23 x, +25 y: only the first takes the
 //      spot search (0x1038a170), the other three spawn on their cell (0x1038a0d0, forced)
@@ -4096,7 +4096,7 @@ auto SummonAt(Game* game, void*& room, int32_t x, int32_t y, int32_t mon, bool s
 // PD2 spawns no spire here.
 std::atomic<uint32_t> g_rathmaSummons {0};
 constexpr int32_t StatRathmaPick = 500;               // mon_cooldown2 (PD2 447)
-constexpr uint32_t RathmaStageKey = 0x55425247;       // 'UBRG', core-maps' stage counter (PD2 game +0x262a)
+constexpr uint32_t RathmaStageKey = 0x55425247;       // 'UBRG', core-events' stage counter (PD2 game +0x262a)
 constexpr int32_t VoidGolem = 954, BloodGolem = 955, RathmaTotem = 956;  // merged ids (PD2 937-939)
 // merged ids of the void knights (PD2 968, 969, 1106, 1107)
 constexpr int32_t KnightPoison = 985, KnightFire = 986, KnightCold = 1123, KnightPhys = 1124;
@@ -4284,7 +4284,7 @@ auto SrvStUberDiabRun(Game* game, Unit* unit, int32_t skillId, int32_t level) no
 // --- Lucion's kit (PD2 srvdofunc 184 Nova, 185 Dash, 186 Punish -> router 190; Dash's srvstfunc 76 -> 40) ------------
 // Read from ProjectDiablo.dll: srvdo 184 at 0x103b5110, 185 at 0x103b52b0, 186 at 0x103b56d0, srvst 76 at 0x103b6aa0
 // (docs/research/pd2-uber-bosses-dll.md, section 5). PD2 reads Lucion's AI params and the fight's sub-step (game
-// +0x262b); core-maps' lucion_ai.cpp keeps them in D2R's per-game counters, read here by the same keys.
+// +0x262b); core-events' lucion_ai.cpp keeps them in D2R's per-game counters, read here by the same keys.
 std::atomic<uint32_t> g_lucionNovas {0};
 std::atomic<uint32_t> g_lucionPunishes {0};
 std::atomic<uint32_t> g_lucionDashes {0};
