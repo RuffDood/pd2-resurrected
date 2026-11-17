@@ -59,3 +59,7 @@ First check the [deviation list](docs/deviations.md): what is on it is known and
 ## Contributing
 
 Want to help? See [CONTRIBUTING.md](CONTRIBUTING.md).
+
+## License
+
+MIT for our own work: see [LICENSE](LICENSE). It does not cover Blizzard's game data, Project Diablo 2's content or the bundled companion plugins; see [NOTICE.md](NOTICE.md).
