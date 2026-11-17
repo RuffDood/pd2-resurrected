@@ -1660,6 +1660,68 @@ static auto PatchUnlimitedBooks(const D2RL::PluginContext* context) noexcept -> 
 	return true;
 }
 
+// --- Charm rows (#358) ---------------------------------------------------------------------------------------------
+// PD2's inventory is 10x8 and a charm works only in its lower four rows (the grid's y 4 to 7, by the charm's top row).
+// D2R's own charm-active body (93847: 0x36ae00) is not called: D2RLoader rewrote its callers to a thunk in its .maho
+// section whose `jmp [slot]` reaches D2RCore's charm policy (stock inventory, custom page or both). No SDK service
+// covers a cell range in the stock inventory, so the slot is swapped for a wrapper (as for crushing blow), found
+// from D2Game's add-to-inventory call site, never by a fixed address.
+sigscan::Entry CharmCallSite {"ItemCharmActiveCall", "charms", sigscan::Kind::Code, 0, 0,
+                              "48 8b cb e8 ?? ?? ?? ?? 83 f8 01 74 ?? 48 8b cb e8 ?? ?? ?? ?? 85 c0 75 ?? 48 8b d7 48 8b cb e8 ?? ?? ?? ?? 85 c0 74 ?? 0f b6 8e 06 01 00 00 41 b9 01 00 00 00"};
+constexpr uint32_t CharmCallOffset = 31;  // the E8 of the charm check in that signature
+constexpr uint32_t CharmFirstActiveRow = 4;  // zero-based: rows 5 to 8
+
+using CharmActiveFn = int32_t (*)(Unit* item, Unit* player) noexcept;
+CharmActiveFn g_charmActiveOriginal = nullptr;
+std::atomic<uint32_t> g_charmChecks {0};
+std::atomic<uint32_t> g_charmOffChecks {0};
+
+auto CharmActiveInRow(Unit* item, Unit* player) noexcept -> int32_t {
+	const int32_t active = g_charmActiveOriginal(item, player);
+	if (active == 0 || item == nullptr) {
+		return active;
+	}
+	const uint8_t page = d2r::Engine<uint8_t (*)(Unit*) noexcept>(d2r::rva::ItemPage)(item);
+	const uint32_t xy = d2r::Engine<uint32_t (*)(Unit*) noexcept>(d2r::rva::UnitPackedXY)(item);
+	const uint32_t row = xy >> 16;
+	const bool off = page == 0 && row < CharmFirstActiveRow;  // a custom page is never judged by its grid row
+	const uint32_t n = off ? ++g_charmOffChecks : ++g_charmChecks;  // own cap, so a top-row charm cannot hide kept lines or flood
+	if (n <= 40 || n % 500 == 0) {
+		plog::Info("charm rows: item %p at x %u y %u, page %u, active in D2R, %s, %u so far", static_cast<void*>(item),
+		           xy & 0xffff, row, page, off ? "switched off" : "kept", n);
+	}
+	return off ? 0 : active;
+}
+
+auto InstallCharmRows(const D2RL::PluginContext* context) noexcept -> bool {
+	sigscan::Entry* const own[] = {&CharmCallSite};
+	sigscan::Resolve(own, 1, context->exeBase, nullptr, 0);
+	if (CharmCallSite.state != sigscan::State::Ok) {
+		return false;
+	}
+	const auto* const call = reinterpret_cast<const uint8_t*>(d2r::imageBase + CharmCallSite.rva + CharmCallOffset);
+	if (call[0] != 0xe8) {
+		return false;
+	}
+	const uint8_t* const thunk = call + 5 + *reinterpret_cast<const int32_t*>(call + 1);
+	if (thunk[0] != 0xff || thunk[1] != 0x25) {  // jmp [rip+disp32]; anything else is not D2RLoader's thunk
+		return false;
+	}
+	const uint8_t* const slot = thunk + 6 + *reinterpret_cast<const int32_t*>(thunk + 2);
+	const uint64_t slotRva = reinterpret_cast<uint64_t>(slot) - d2r::imageBase;
+	const uint64_t original = *reinterpret_cast<const uint64_t*>(slot);
+	if (original == 0) {
+		return false;
+	}
+	g_charmActiveOriginal = reinterpret_cast<CharmActiveFn>(original);
+	if (!context->PatchWriteU64(slotRva, &original, sizeof(original),
+	                            reinterpret_cast<uint64_t>(static_cast<CharmActiveFn>(CharmActiveInRow)))) {
+		return false;
+	}
+	plog::Info("charm rows: charm policy slot at image +0x%llx swapped", static_cast<unsigned long long>(slotRva));
+	return true;
+}
+
 auto InstallItemRules(const D2RL::PluginContext* context, char* report, size_t reportSize) noexcept -> int {
 	using namespace d2r::rva;
 	g_context = context;
@@ -1702,22 +1764,24 @@ auto InstallItemRules(const D2RL::PluginContext* context, char* report, size_t r
 	// Unlimited books (IR5): D2R's item spell table is data; its free entry 17 gets the Town Portal handlers and 18
 	// none (core-events' hooks identify all), both with keep 1, so the book stays after its use
 	const bool unlimited = PatchUnlimitedBooks(context);
+	const bool charms = InstallCharmRows(context);
 	std::snprintf(report, reportSize, "property func %d ormus%s; weapon strike%s; missile strike%s; "
 	              "crushing blow roll%s; life steal cap%s; crushing blow%s; curses%s; skill on equip and op bases%s; "
-	              "replenish charges%s; unlimited books%s",
+	              "replenish charges%s; unlimited books%s; charm rows%s",
 	              PropertySlot, property ? "" : " FAILED (slot not empty)",
 	              weaponStrike ? "" : " FAILED (bytes differ)", missileStrike ? "" : " FAILED (bytes differ)",
 	              blowRoll ? "" : " FAILED (call sites)", lifeCap ? "" : " FAILED (bytes differ)",
 	              blow ? "" : " FAILED (slot write)", curses ? "" : " FAILED (bytes differ)",
 	              equip ? "" : " FAILED (bytes differ)", replenish ? "" : " FAILED (bytes differ)",
-	              unlimited ? "" : " FAILED (entries not empty, or no mutation service)");
+	              unlimited ? "" : " FAILED (entries not empty, or no mutation service)",
+	              charms ? "" : " FAILED (signature or bytes differ)");
 	return (property ? 1 : 0) + (weaponStrike ? 1 : 0) + (missileStrike ? 1 : 0) + (blowRoll ? 1 : 0) +
 	       (lifeCap ? 1 : 0) + (blow ? 1 : 0) + (curses ? 1 : 0) + (equip ? 1 : 0) + (replenish ? 1 : 0) +
-	       (unlimited ? 1 : 0);
+	       (unlimited ? 1 : 0) + (charms ? 1 : 0);
 }
 
 auto ItemRuleCount() noexcept -> int {
-	return 10;
+	return 11;
 }
 
 auto ItemRuleCounters(char* out, size_t size) noexcept -> void {
