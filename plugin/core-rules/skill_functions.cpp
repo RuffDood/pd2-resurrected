@@ -4530,13 +4530,13 @@ auto CltDoLucionBlink(Unit* unit, int32_t skillId, int32_t level) noexcept -> in
 	return 1;
 }
 
-// The dashing units whose landing ring is still due: PD2 ends the mode on landing, D2R's leap client runs on, so
-// each start arms one landing.
+// The dashing units whose landing ring is still due: each start arms one landing, which fires when the unit reaches
+// the path's target.
 // shortcut: 8 dashers at once; upgrade if more than 8 dash on one screen.
 Unit* g_dashers[8] {};
 
-// PD2 cltdo 114 (LucionDash): D2R's leap client (cltdo 43, as CltDoLeap) at PD2's speed (monstats Run << 9, a player's
-// 0xb00 + calc2 * 0x50), a ring of cltcalc1 cltmissilea on the start frame, and a ring of cltcalc2 cltmissileb within
+// PD2 cltdo 114 (LucionDash): PD2's flat dash client (not D2R's CltDoLeap, whose jump arc lifts the unit) at PD2's
+// speed (monstats Run << 9, a player's 0xb00 + calc2 * 0x50), a ring of cltcalc1 cltmissilea on the start frame, and a ring of cltcalc2 cltmissileb within
 // 2 subtiles of the path's target.
 // shortcut: PD2's in-flight cltmissilec trail (a D2Client call, 0x103a1530) is not ported; the server's srvmissilec
 // trail shows in its place. Upgrade if luciondashtrail looks missing in play.
@@ -4549,12 +4549,16 @@ auto CltDoLucionDash(Unit* unit, int32_t skillId, int32_t level) noexcept -> int
 		return 0;
 	}
 	const uint32_t flags = Flags(uskill);
-	const int32_t ran = d2r::Engine<int32_t (*)(Unit*, int32_t) noexcept>(d2r::rva::CltDoLeap)(unit, skillId);
+	// D2R's leap client (CltDoLeap) lifts the unit on a jump arc PD2's flat dash lacks (#1205): the model rose off
+	// screen while the server's unit stayed at the player. The path follows the server, so the call is skipped.
+	const int32_t ran = 1;
 	int32_t x = 0, y = 0;
 	if (!d2r::UnitXY(unit, &x, &y)) {
 		return ran;
 	}
-	if ((flags & 0x80) != 0 && (flags & 0x100) == 0) {
+	Unit** const armed = std::find(std::begin(g_dashers), std::end(g_dashers), unit);
+	// The leap client set flag 0x100 after its first call; without it the start frame is the first call per dash.
+	if ((flags & 0x80) != 0 && armed == std::end(g_dashers)) {
 		int32_t velocity = 0;
 		if (At<int32_t>(unit, UnitType) == UnitMonster) {
 			const uint8_t* mon =
@@ -4579,7 +4583,7 @@ auto CltDoLucionDash(Unit* unit, int32_t skillId, int32_t level) noexcept -> int
 		}
 		return ran;
 	}
-	Unit** slot = std::find(std::begin(g_dashers), std::end(g_dashers), unit);
+	Unit** slot = armed;
 	void* path = At<void*>(unit, UnitPath);
 	if (slot == std::end(g_dashers) || path == nullptr) {
 		return ran;
