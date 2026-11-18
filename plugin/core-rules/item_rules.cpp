@@ -1679,6 +1679,68 @@ CharmActiveFn g_charmActiveOriginal = nullptr;
 std::atomic<uint32_t> g_charmChecks {0};
 std::atomic<uint32_t> g_charmOffChecks {0};
 
+// A unique charm of the same name in the active rows too (#1288): D2R's (item) -> unique row + 1, the cube executor's read.
+constexpr uint64_t ItemUniqueRow = 0x36ce70;
+constexpr int32_t QualityUnique = 7;
+
+// Stats follow the policy only when the engine asks it: link (0x475140 -> StatListLink 0x2f81a0) happens on a yes from the add
+// path 0x475090, identify 0x46e8c0 / 0x46ea70 and the refresh 0x470ca0, which asks about every stored grid item, linked or not,
+// but only links (never unlinks). An item leaving the grid is unlinked by 0x46f710 inside the move (0x4747f0), then the move
+// runs the refresh (0x471e90 / 0x472590). So: on any ask about a unique charm with a twin, answer no and unlink every linked
+// copy (the item too) with StatListUnlink 0x2f8290; when a copy leaves, the refresh asks about the other one, finds no twin and
+// links it. No return address is needed: the rule is the same whoever asks.
+constexpr uint64_t ItemStatsAttached = 0x2f8120;  // (item, int* out) -> the item's stat list's owner, 0 when not linked
+constexpr uint64_t StatListUnlink = 0x2f8290;     // (owner, item), toolkit stats.h
+constexpr uint32_t CharmTwinLogCap = 200;
+std::atomic<uint32_t> g_charmTwinLogs {0};
+
+// Unlinks item if its stats are on; true when it did.
+auto UnlinkIfAttached(Unit* item, Unit* player) noexcept -> bool {
+	if (d2r::Engine<uint64_t (*)(Unit*, int32_t*) noexcept>(ItemStatsAttached)(item, nullptr) == 0) {
+		return false;
+	}
+	d2r::Engine<void (*)(Unit*, Unit*) noexcept>(StatListUnlink)(player, item);
+	return true;
+}
+
+// Same-name unique charms stored (mode 0, so never the cursor) with their top row in rows 5-8, item excluded; each linked one is
+// unlinked (counted in unlinked). Returns how many there are, 0 when item is not in the player's item list: the client's remove
+// handler 0x1c60a0 asks about the leaving copy after 0x389820 took it out (mode and cell unchanged) and unlinks it and refreshes
+// 0x1c9610 only on a yes, so a leaving copy gets D2RCore's answer. A twin D2RCore refuses (unidentified, requirements) still counts.
+auto UnlinkTwins(Unit* item, Unit* player, uint32_t* unlinked) noexcept -> uint32_t {
+	using namespace d2r::rva;
+	if (player == nullptr || d2r::Engine<int32_t (*)(Unit*) noexcept>(ItemQuality)(item) != QualityUnique) {
+		return 0;
+	}
+	void* inventory = d2r::Engine<void* (*)(Unit*, const char*, int32_t) noexcept>(UnitInventory)(player, __FILE__, __LINE__);
+	if (inventory == nullptr) {
+		return 0;
+	}
+	const auto uniqueRow = d2r::Engine<int32_t (*)(Unit*) noexcept>(ItemUniqueRow);
+	const auto next = d2r::Engine<Unit* (*)(Unit*) noexcept>(InventoryNextItem);
+	const int32_t mine = uniqueRow(item);
+	Unit* const first = d2r::Engine<Unit* (*)(void*) noexcept>(InventoryFirstItem)(inventory);
+	Unit* listed = first;
+	while (listed != nullptr && listed != item) {
+		listed = next(listed);
+	}
+	if (listed == nullptr) {
+		return 0;
+	}
+	uint32_t found = 0;
+	for (Unit* other = first; other != nullptr; other = next(other)) {
+		if (other != item && At<int32_t>(other, UnitType) == 4 &&
+		    d2r::Engine<uint32_t (*)(Unit*) noexcept>(UnitModeOf)(other) == 0 &&
+		    d2r::Engine<uint8_t (*)(Unit*) noexcept>(ItemPage)(other) == 0 &&
+		    (d2r::Engine<uint32_t (*)(Unit*) noexcept>(UnitPackedXY)(other) >> 16) >= CharmFirstActiveRow &&
+		    d2r::Engine<int32_t (*)(Unit*) noexcept>(ItemQuality)(other) == QualityUnique && uniqueRow(other) == mine) {
+			++found;
+			*unlinked += UnlinkIfAttached(other, player) ? 1 : 0;
+		}
+	}
+	return found;
+}
+
 // True when D2R counts the charm as active but it sits in a top grid row: PD2 switches it off.
 auto CharmSwitchedOff(Unit* item, Unit* player, uint32_t& xy, uint8_t& page) noexcept -> bool {
 	if (item == nullptr || g_charmActiveOriginal(item, player) == 0) {
@@ -1696,11 +1758,22 @@ auto CharmActiveInRow(Unit* item, Unit* player) noexcept -> int32_t {
 	}
 	uint32_t xy = 0;
 	uint8_t page = 0;
-	const bool off = CharmSwitchedOff(item, player, xy, page);
+	// a same-name unique in the active rows switches both off (#1288); a cursor-held copy (mode 4) never counts
+	uint32_t unlinked = 0;
+	bool off = CharmSwitchedOff(item, player, xy, page);
+	const uint32_t row = xy >> 16;
+	const bool twin = !off && page == 0 && row >= CharmFirstActiveRow &&
+	                  d2r::Engine<uint32_t (*)(Unit*) noexcept>(d2r::rva::UnitModeOf)(item) == 0 && UnlinkTwins(item, player, &unlinked) != 0;
+	if (twin) {
+		unlinked += UnlinkIfAttached(item, player) ? 1 : 0;
+		off = true;
+	}
 	const uint32_t n = off ? ++g_charmOffChecks : ++g_charmChecks;  // own cap, so a top-row charm cannot hide kept lines or flood
-	if (n <= 40 || n % 500 == 0) {
-		plog::Info("charm rows: item %p at x %u y %u, page %u, active in D2R, %s, %u so far", static_cast<void*>(item),
-		           xy & 0xffff, xy >> 16, page, off ? "switched off" : "kept", n);
+	if (n <= 40 || n % 500 == 0 || (twin && ++g_charmTwinLogs <= CharmTwinLogCap)) {  // a twin answer is the #1288 case
+		plog::Info("charm rows: item %p at x %u y %u, page %u, quality %d, unique row+1 %d, same-name twin in rows 5-8 %s, %u stat lists unlinked, active in D2R, %s, %u so far",
+		           static_cast<void*>(item), xy & 0xffff, row, page,
+		           d2r::Engine<int32_t (*)(Unit*) noexcept>(d2r::rva::ItemQuality)(item),
+		           d2r::Engine<int32_t (*)(Unit*) noexcept>(ItemUniqueRow)(item), twin ? "yes" : "no", unlinked, off ? "switched off" : "kept", n);
 	}
 	return off ? 0 : active;
 }
