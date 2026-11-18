@@ -7,6 +7,8 @@ Slot3 on a level 99 Assassin (Hell, Harrogath) driven by a virtual XInput pad (t
 [d2r-test-harness#2](https://github.com/synpoox/d2r-test-harness/pull/2)). Screenshots stay in the slot's run folder;
 the evidence below is the word description of each one and the string and layout files named.
 
+The controls the mod ships, with source and status, are in [docs/controller.md](../../controller.md).
+
 ## 1. What D2R already does of PD2's layer
 
 PD2's layer, as `docs/pd2/engine-dll-triage.md` lists it (from `ProjectDiablo.dll`: the `XINPUT1_4.dll` import, the
@@ -75,7 +77,7 @@ Short work items, each a sub-issue of #340:
 4. Done in #1443: a pad check of each companion plugin, see "Companion plugins with the virtual pad".
 5. Confirm where the Cube's controller focus starts.
 
-Left out on purpose: PD2's 13 binds (D2R's 6 + 6 stand in). Aim assist, dead zone and button style: see section 4.
+PD2 pad binds, one line each with its status: [docs/controller.md](../../controller.md#pd2-binds). Aim assist, dead zone and button style: see section 4.
 
 ## 4. The three items the first audit left out (aim assist, dead zone, button style)
 
