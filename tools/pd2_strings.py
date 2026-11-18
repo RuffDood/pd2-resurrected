@@ -11,6 +11,8 @@ generated/data/local/lng/. merge/strings.json holds key names and numbers only, 
              hiredesc_<code> key takes the description in PD2's hiredesc table (PD2 has no string for it).
   entries    key -> LevelName key, for the LevelEntry keys shared/classic_import ids.fix_levels gives PD2-only levels: "Entering " and that
              name, PD2's text (else D2R's), in all 13 languages; --assign adds them from the merged levels.txt
+  cut        ids keys the rule leaves out (their IDs stay listed, append-only): names of PD2's cut map levels and its
+             cut Monastery Map item, which nothing in files/data names (#964, #1231, #1249, #1233)
   texts      key -> English the mod writes itself, for listed keys PD2 has no text for (skilldesc lines in D2R's
              format, #73); written into all 13 languages like PD2's
 A key in pd2_port.PLAIN_STRINGS' values takes its source key's text without printf codes (#383). The rule fails if a
@@ -112,6 +114,8 @@ def build(cfg: dict, pd2: dict[str, str], s, out_root: Path) -> list[str]:
         if sid & 0xFFFF in used16 or sid > 0xFFFF or sid in seen:
             raise ValueError(f"string ID {sid} ({key}) is used by D2R, repeated or above 65535")
         seen.add(sid)
+        if key in cfg.get("cut", []):
+            continue
         src = plain_src.get(key, entries.get(key))
         if src is not None:  # PD2's text of the source key, else D2R's in each language
             d2r = next((e for rel, e in index.get(src.lower(), []) if e["Key"] == src), None)
@@ -161,6 +165,16 @@ def check_stat_strings(excel: Path, lng: Path, d2r_lng: Path) -> None:
             bad.append(f"{f['Stat']} ({f['descstr2']})")
     if bad:
         raise ValueError(f"descstr2 text with printf codes, printed raw after the value: {', '.join(bad)}")
+
+
+def check_cut(cfg: dict, excel: Path) -> None:
+    """pd2_merge runs this on the finished tables (mid-merge, PD2's level rows still name the keys). Fails when a cut key is not an ids key (a typo) or a merged table still names it (its text would go missing)."""
+    cut = set(cfg.get("cut", []))
+    if cut - set(cfg["ids"]):
+        raise ValueError(f"cut keys not in ids: {sorted(cut - set(cfg['ids']))}")
+    used = cut & set(referenced(excel))
+    if used:
+        raise ValueError(f"cut keys a table names: {sorted(used)}")
 
 
 def rule(rule_file: Path, pd2_data: Path, d2r_data: Path, out_data: Path) -> None:

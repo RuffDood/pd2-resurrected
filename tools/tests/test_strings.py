@@ -138,6 +138,21 @@ class StringsTests(unittest.TestCase):
         pd2_strings.build(cfg, self.pd2, self.strings(), self.root / "out")
         self.assertEqual(self.built("strings/item-modifiers.json")["ModStrMap"]["deDE"], "Chance of Strike")
 
+    def test_cut_keys_are_skipped_and_checked(self):
+        cfg = {"overrides": [], "texts": {"Gone": "x", "Kept": "y"}, "cut": ["Gone"],
+               "ids": {"Gone": [50000, "skills.json"], "Kept": [50001, "skills.json"]}}
+        pd2_strings.build(cfg, self.pd2, self.strings(), self.root / "out")
+        self.assertEqual(sorted(set(self.built("strings/skills.json")) & {"Gone", "Kept"}), ["Kept"])
+        excel = self.root / "excel"
+        excel.mkdir()
+        (excel / "levels.txt").write_bytes(b"Name\tLevelName\r\nA\tOther\r\n")
+        pd2_strings.check_cut(cfg, excel)
+        with self.assertRaisesRegex(ValueError, "not in ids"):
+            pd2_strings.check_cut({**cfg, "cut": ["Typo"]}, excel)
+        (excel / "levels.txt").write_bytes(b"Name\tLevelName\r\nA\tGone\r\n")
+        with self.assertRaisesRegex(ValueError, "a table names"):
+            pd2_strings.check_cut(cfg, excel)
+
     def test_stat_strings_check_refuses_format_codes_after_the_value(self):
         excel, lng = self.root / "excel", self.root / "out/data/local/lng"
         excel.mkdir()
