@@ -15,6 +15,7 @@
 #include "cube_stacks.h"
 
 #include "log.h"
+#include "map_stack.h"
 #include "property_ids.h"
 
 #include <D2RLPlugin/inventory.h>
@@ -36,8 +37,6 @@ namespace items = D2RL::Items;
 constexpr uint8_t OpBlock = 30;  // core-events: matched without the input count, as PD2 does
 constexpr int Inputs = 7;
 constexpr int Slots = d2r::rva::CubeMatchUsedSlots;
-
-constexpr int MaxMapProps = 4;
 
 struct MatchOut {
 	uint64_t words[6];
@@ -149,42 +148,28 @@ auto InputMatch(Game* game, void* inventory, const uint8_t* row, int32_t input, 
 struct Leftover {
 	uint32_t code;
 	uint32_t quantity;
+	uint32_t original;  // the stack's quantity before the row ran
 	uint32_t itemLevel;
 	uint32_t sourceId;  // the stack's unit id: the executor must have taken it before it comes back
-	items::PropertySpec props[MaxMapProps];  // a map's non-quantity stats (#1326), made again as properties
-	uint32_t propCount;
+	pd2::mapstack::Saved saved;  // a map's non-quantity stats (#1326); its forced event is made again as a property
 };
 
-// A map's non-quantity stats as createItem properties: only the two the mod puts on maps (Area Level, forced event);
-// false when it has any other, so the stack is not remade without it (#1326)
-auto MapProperties(Unit* item, Leftover& left) noexcept -> bool {
+// A map's non-quantity stats, to set on the remade unit: only the two the mod puts on maps (Area Level, forced event);
+// the first other stat id when it has one, so the stack is not remade without it (#1326); -1 when none
+auto MapProperties(Unit* item, Leftover& left) noexcept -> int32_t {
 	using namespace d2r::rva;
 	if (d2r::Engine<int32_t (*)(Unit*, int32_t) noexcept>(ItemIsType)(item, ItemTypeMap) == 0) {
-		return true;
+		return -1;
 	}
-	struct Entry {
-		uint16_t layer, stat;
-		int32_t value;
-	};
-	const auto entries = d2r::Engine<int32_t (*)(Unit*, uint32_t, Entry*, int32_t) noexcept>(UnitStatEntries);
-	for (int32_t stat = 0; stat < ItemStatCostRows; ++stat) {
-		Entry e[16] {};
-		int32_t n = stat == StatQuantity ? 0 : entries(item, static_cast<uint32_t>(stat), e, 16);
-		if (n > 16) {
-			return false;  // more layers than the buffer: refuse rather than drop some
-		}
-		for (int32_t i = 0; i < n; ++i) {
-			const bool level = stat == StatMapLevel, event = stat == StatMapForceEvent;
-			// properties.txt map-level, map-force-event-l (param = layer) by code (#1371); a missing code refuses the stack
-			static const int32_t propMapLevel = propids::Resolve("map-level"), propForceEvent = propids::Resolve("map-force-event-l");
-			if ((!level && !event) || left.propCount >= MaxMapProps || propMapLevel < 0 || propForceEvent < 0) {
-				return false;
-			}
-			left.props[left.propCount++] = items::MakeExactProperty(static_cast<uint32_t>(level ? propMapLevel : propForceEvent), e[i].value,
-			                                                        level ? 0 : e[i].layer);
+	pd2::mapstack::Collect(item, ItemStatCostRows, StatQuantity,
+	                       d2r::Engine<int32_t (*)(Unit*, uint32_t, pd2::mapstack::Entry*, int32_t) noexcept>(UnitStatEntries), left.saved);
+	for (int32_t i = 0; i < left.saved.count; ++i) {
+		const int32_t stat = left.saved.entry[i].stat;
+		if ((stat != StatMapLevel && stat != StatMapForceEvent) || (stat == StatMapForceEvent && propids::Resolve("map-force-event-l") < 0)) {
+			return stat;
 		}
 	}
-	return true;
+	return -1;
 }
 
 Leftover g_pending[Slots];
@@ -192,19 +177,34 @@ int g_pendingCount = 0;
 std::atomic<bool> g_busy {false};  // a batch is queued; game thread sets it, the game-thread callback clears it
 
 struct SourceScan {
-	bool left[Slots] = {};  // that leftover's stack is still in the cube
+	int32_t now[Slots] = {};  // that leftover's stack quantity if it is still in the cube (0: gone)
 };
 
 auto ScanSources(const D2RL::PluginContext*, const items::ItemInfo* item, void* user) noexcept
 	-> D2RL::Inventory::IterationAction {
 	auto* scan = static_cast<SourceScan*>(user);
 	for (int i = 0; i < g_pendingCount; ++i) {
-		scan->left[i] |= g_pending[i].sourceId == item->runtimeId;
+		if (g_pending[i].sourceId == item->runtimeId) {
+			scan->now[i] = item->quantity > 0 ? item->quantity : 1;
+		}
 	}
 	return D2RL::Inventory::IterationAction::Continue;
 }
 
+// The forced event goes back as properties.txt map-force-event-l (param = layer, #1371): a SetUnitStat on the made unit
+// reached neither the client's tooltip nor the save (Slot3, #1400). Area Level is not passed: map-level adds onto the
+// level createItem gives (174, not 87), and a normal map has only that level (the map-level rows take rare maps)
 auto Create(D2RL::PlayerHandle player, const Leftover& left, items::ItemContainer container) noexcept -> items::Result {
+	static const int32_t propForceEvent = propids::Resolve("map-force-event-l");
+	items::PropertySpec props[64];
+	uint32_t propCount = 0;
+	for (int32_t i = 0; i < left.saved.count; ++i) {
+		const pd2::mapstack::Entry& e = left.saved.entry[i];
+		if (e.stat == d2r::rva::StatMapForceEvent) {  // MapProperties refused the stack when the property is missing
+			props[propCount++] = items::MakeExactProperty(static_cast<uint32_t>(propForceEvent), e.value, e.layer);
+			plog::Info("stacks: leftover %.4s gets forced event layer %d value %d", reinterpret_cast<const char*>(&left.code), e.layer, e.value);
+		}
+	}
 	const items::ItemCreateSpec spec {.structSize = items::ItemCreateSpecSize,
 	                                  .code = left.code,
 	                                  .quality = items::Quality::Normal,
@@ -214,8 +214,8 @@ auto Create(D2RL::PlayerHandle player, const Leftover& left, items::ItemContaine
 	                                  .quantity = left.quantity,
 	                                  .durability = items::DefaultValue,
 	                                  .stateFlags = items::ItemStateIdentified,  // else the stack comes back unidentified
-	                                  .propertyCount = left.propCount,
-	                                  .properties = left.props,
+	                                  .propertyCount = propCount,
+	                                  .properties = props,
 	                                  .destination = {.structSize = items::ItemDestinationSize,
 	                                                  .container = container,
 	                                                  .placement = items::Placement::Automatic}};
@@ -231,11 +231,21 @@ void MakeLeftovers(const D2RL::PluginContext*, void* user) noexcept {
 	                                          .containerMask = items::ContainerBit(items::ItemContainer::Cube)};
 	const auto listed = g_inventory->forEachInventoryItem(g_context, player, &filter, ScanSources, &scan);
 	for (int i = 0; i < g_pendingCount; ++i) {
-		const Leftover& left = g_pending[i];
-		// A stack the row kept (useitem: the rune upgrades' key) stays whole; an unread cube makes nothing
-		if (listed != D2RL::Inventory::Result::Success || scan.left[i]) {
-			plog::Info("stacks: leftover %.4s x%u not made: its stack is still in the cube (read %u)",
-			           reinterpret_cast<const char*>(&left.code), left.quantity, static_cast<uint32_t>(listed));
+		Leftover left = g_pending[i];
+		// A stack the row kept: useitem leaves it whole (the rune upgrades' key); usetype,..,mod makes the kept unit the
+		// output with quantity 1 (a fortified map from a stack, #1400), so what it lost comes back. An unread cube makes nothing
+		if (scan.now[i] != 0 && left.original > static_cast<uint32_t>(scan.now[i])) {
+			left.quantity = left.original - static_cast<uint32_t>(scan.now[i]);
+		} else if (scan.now[i] != 0) {
+			left.quantity = 0;
+		}
+		if (listed != D2RL::Inventory::Result::Success) {
+			plog::Info("stacks: leftover %.4s not made: the cube could not be read (%u)", reinterpret_cast<const char*>(&left.code),
+			           static_cast<uint32_t>(listed));
+			continue;
+		}
+		if (left.quantity == 0) {
+			plog::Info("stacks: leftover %.4s not made: its stack is whole in the cube", reinterpret_cast<const char*>(&left.code));
 			continue;
 		}
 		items::Result made = Create(player, left, items::ItemContainer::Cube);
@@ -348,9 +358,9 @@ auto KeepCubeLeftovers(Game* game, Unit* player, const uint8_t* record) noexcept
 				return false;  // createItem would remake it without its affixes
 			}
 			found[count] = {d2r::Engine<uint32_t (*)(Unit*) noexcept>(ItemCode)(item), static_cast<uint32_t>(quantity - use),
-			                d2r::Engine<uint32_t (*)(Unit*) noexcept>(ItemLevel)(item), At<uint32_t>(item, UnitIdField), {}, 0};
-			if (!MapProperties(item, found[count])) {
-				plog::Info("stacks: refused, a map stack the row leaves units of has a stat that cannot be remade");
+			                static_cast<uint32_t>(quantity), d2r::Engine<uint32_t (*)(Unit*) noexcept>(ItemLevel)(item), At<uint32_t>(item, UnitIdField), {}};
+			if (const int32_t stat = MapProperties(item, found[count]); stat >= 0) {
+				plog::Info("stacks: refused, a map stack the row leaves units of has stat %d, which cannot be remade", stat);
 				return false;
 			}
 			++count;
