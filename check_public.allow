@@ -1,0 +1,3 @@
+# Generic false positives in the raw import (same as main, ADR 0007): Blizzard support addresses in D2R UI strings.
+files/data/local/lng/strings/ui.json :: @blizzard\.
+files/data/local/lng/strings-legacy/ui.json :: @blizzard\.
