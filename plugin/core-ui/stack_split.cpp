@@ -13,10 +13,12 @@
 // held the watch notes the stored stacks with its code, and the job splits N-1 back off the one that rose by N.
 // shortcut: a merge that stops at the stack cap leaves the rest on the cursor, and that is kept as D2R does it (PD2
 // would add one); upgrade if players miss it.
+// Pad: Controller QoL's item modifier (LB by default) held with A is the Ctrl of a pad (controller_split.cpp).
 // shortcut: the job runs on the next game update and looks once; a server that has not placed the item by then skips
 // the split (logged), fine on a local game, upgrade with a retry if hosted games miss splits.
 #include "stack_split.h"
 
+#include "controller_split.h"
 #include "log.h"
 #include "map_stack.h"
 #include "pd2_engine.h"
@@ -202,12 +204,12 @@ void Watch(const D2RL::PluginContext*, void*) noexcept {
 		}
 		return;
 	}
-	const bool ctrl = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
+	const bool ctrl = g_held.quantity > 1 && ((GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0 || controller_split::ModifierHeld());
 	if (g_held.quantity > 1) {
 		++g_putDowns;
 		g_ctrlPutDowns += ctrl ? 1 : 0;
 	}
-	if (ctrl && g_held.quantity > 1 && !g_busy.exchange(true)) {
+	if (ctrl && !g_busy.exchange(true)) {
 		g_job = {player, g_held.code, g_held.runtimeId, g_held.quantity, g_stored};
 		if (const auto queued = g_threads->runOnGameThread(g_context, SplitNow, nullptr); queued != D2RL::Threads::Result::Success) {
 			g_busy = false;
@@ -253,7 +255,7 @@ void Install(const D2RL::PluginContext* context, char* report, size_t size) noex
 		std::snprintf(report, size, "FAILED (no player-ready listener)");
 		return;
 	}
-	std::snprintf(report, size, "Ctrl+left-click puts one item of a held stack down");
+	std::snprintf(report, size, "Ctrl+left-click (or Controller QoL's modifier, LB by default, and A on a pad) puts one item of a held stack down");
 }
 
 void Counters(char* out, size_t size) noexcept {
