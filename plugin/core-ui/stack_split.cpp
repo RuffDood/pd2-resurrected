@@ -125,10 +125,19 @@ auto FindPlaced(const D2RL::PluginContext*, const items::ItemInfo* item, void* u
 	return D2RL::Inventory::IterationAction::Continue;
 }
 
-void CollectNative(const D2RL::PluginContext*, void* native, void* user) noexcept {
+// splitStack copies no stats; the piece is made with its own Area Level, so only the forced event (stat 553) is set again:
+// read off the source before the split, set on the piece after (two callbacks, never both units at once)
+void CollectForcedEvent(const D2RL::PluginContext*, void* native, void* user) noexcept {
+	auto& saved = *static_cast<pd2::mapstack::Saved*>(user);
 	pd2::mapstack::Collect(static_cast<d2r::Unit*>(native), d2r::rva::ItemStatCostRows, d2r::rva::StatQuantity,
-	                       d2r::Engine<int32_t (*)(d2r::Unit*, uint32_t, pd2::mapstack::Entry*, int32_t) noexcept>(d2r::rva::UnitStatEntries),
-	                       *static_cast<pd2::mapstack::Saved*>(user));
+	                       d2r::Engine<int32_t (*)(d2r::Unit*, uint32_t, pd2::mapstack::Entry*, int32_t) noexcept>(d2r::rva::UnitStatEntries), saved);
+	int32_t kept = 0;
+	for (int32_t i = 0; i < saved.count; ++i) {
+		if (saved.entry[i].stat == d2r::rva::StatMapForceEvent) {
+			saved.entry[kept++] = saved.entry[i];
+		}
+	}
+	saved.count = kept;
 }
 
 void ApplyNative(const D2RL::PluginContext*, void* native, void* user) noexcept {
@@ -155,11 +164,12 @@ void SplitNow(const D2RL::PluginContext*, void*) noexcept {
 		           placed.quantity, static_cast<uint32_t>(placed.container));
 		return;
 	}
-	// A map's non-quantity stats are read off the source before the split (the piece is made after)
+	// Only the forced event is set again: the piece already has its Area Level, and setting that on top doubled it on the
+	// server (87 -> 174), so the piece would not stack until a reload (#1499)
 	const bool isMap = pd2::mapstack::IsMapCode(placed.code);
 	pd2::mapstack::Saved saved;
 	if (isMap) {
-		g_items->editNativeItem(g_context, placed.handle, CollectNative, &saved);
+		g_items->editNativeItem(g_context, placed.handle, CollectForcedEvent, &saved);
 	}
 	const items::SplitStackRequest request {.structSize = items::SplitStackRequestSize,
 	                                        .player = player,
@@ -172,9 +182,9 @@ void SplitNow(const D2RL::PluginContext*, void*) noexcept {
 	} else {
 		++g_failed;
 	}
-	if (isMap && status == items::Result::Success) {
+	if (isMap && saved.count > 0 && status == items::Result::Success) {
 		const auto applied = g_items->editNativeItem(g_context, result.cursorItem, ApplyNative, &saved);
-		plog::Info("split: copied %d stats onto the new map piece (%u)", saved.count, static_cast<uint32_t>(applied));
+		plog::Info("split: set the forced event (%d entries) on the new map piece (%u)", saved.count, static_cast<uint32_t>(applied));
 	}
 	plog::Info("split: code %08x container %u cell %d,%d, %d held onto %d: result %u, %u left down, %u on the cursor",
 	           placed.code, static_cast<uint32_t>(placed.container), placed.x, placed.y, held, found.before,
