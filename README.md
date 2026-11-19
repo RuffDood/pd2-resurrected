@@ -1,7 +1,6 @@
-# PD2 Resurrected
+# Project Diablo II: Resurrected
 
-Project Diablo II rebuilt as a Diablo II: Resurrected mod: PD2's items, skills, monsters and rules, in D2R's
-graphics. Offline single-player for now; private multiplayer comes later.
+Project Diablo II rebuilt as a Diablo II: Resurrected mod.
 
 **Status: alpha 0.2.1** ([roadmap](docs/roadmap.md), [changelog](CHANGELOG.md), [how it differs from PD2](docs/deviations.md)).
 
@@ -9,7 +8,7 @@ graphics. Offline single-player for now; private multiplayer comes later.
 
 - Windows and Diablo II: Resurrected 3.4.0 (build 95032) or 3.3.0 (build 93847) with Reign of the Warlock. One
   release runs on both: D2RLoader runs its own 3.3 engine image with the installed game's data.
-- [D2RLoader](https://d2rloader.net/) 1.3.1-beta. Characters load only through it.
+- [D2RLoader](https://d2rloader.net/) 1.3.1-beta.
 
 ## Install
 
@@ -48,14 +47,11 @@ The mod ships the Controller QOL Updates plugin (PyreFly), which changes some of
 These PD2 features are left out on purpose. Every deviation from PD2, cut or not, is listed in
 [docs/deviations.md](docs/deviations.md).
 
-- PD2's 10x8 inventory and stash pages, with the maps stash tab: D2R's layouts stay. The cube has PD2's 4x4 grid.
+- PD2's stash pages: D2R's stash stays for now.
 - PvP: the PvP maps, the BR Arena and every PvP rule, including the arenas' life regen cap.
 - Corrupted zones: D2R's Terror Zones stand in.
-- PD2's sound tables: D2R's sounds stay.
 - PD2's Uber Ancients: D2R's own Uber Ancients stays.
-- The Butcher's Lair map event (PD2 has it turned off).
 - Chat commands: `.kills`, `.deaths`, `.played`, `.age`, `.allstats`, `.accountstats` and `.noexp`.
-- The advanced stats panel, the grail panel and PD2's display.
 
 ## Bug reports
 
