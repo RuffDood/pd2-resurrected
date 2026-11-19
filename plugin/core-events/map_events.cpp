@@ -499,7 +499,7 @@ constexpr uint8_t UseItemEntry[] = {0x40, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x
 // Using one map of a stack (#1397). Item spell 16 is a used-up spell (its table byte, read by 0x308e80), so the handler
 // takes the used item whole: a stack of maps lost every map. So a stack of N > 1 gives one map to a free inventory cell
 // first (one executeTransaction: the stack is debited 1 in place, keeping N-1, its cell and its identity, and a single
-// map of the same code is made, with the stack's stats copied on) and the handler uses that map, at its own cell (the
+// map of the same code is made, with the stack's stats copied on, except Area Level) and the handler uses that map, at its own cell (the
 // packet's item id and x, y; the handler takes only inventory or belt locations for a use on the player, and a split
 // to the cursor was refused for that). A refused use puts the map back onto the stack. The SDK names the local player
 // on the UI thread only, so its handle is kept from LocalPlayerReady; and it answers Busy to an item change from inside
@@ -555,7 +555,7 @@ auto UseOneOfStack(Game* game, Unit* player, Unit* stack, uint8_t* packet, char 
 		           g_items == nullptr ? "no SDK item services" : "not in the local player's inventory");
 		return false;
 	}
-	// One map off the stack into a free cell, then the stack's own stats (map level, affixes, the forcing marker) onto it
+	// One map off the stack into a free cell, then the stack's own stats (affixes, the forcing marker; not the map level) onto it
 	pd2::mapstack::Saved saved;
 	pd2::mapstack::Collect(stack, ItemStatCostRows, StatQuantity,
 	                       d2r::Engine<int32_t (*)(Unit*, uint32_t, pd2::mapstack::Entry*, int32_t) noexcept>(UnitStatEntries), saved);
@@ -585,8 +585,11 @@ auto UseOneOfStack(Game* game, Unit* player, Unit* stack, uint8_t* packet, char 
 		plog::Info("map use: a stack of %d not split (result %u, inventory full?), so the use is refused", quantity, static_cast<uint32_t>(status));
 		return false;
 	}
+	// The piece already has its own Area Level (564); setting it again doubled it (87 -> 174, #1504, as #1499), so skip it
 	pd2::mapstack::Apply(unit, saved, [](Unit* u, int32_t stat, int32_t value, int32_t layer) noexcept {
-		d2r::Engine<void (*)(Unit*, int32_t, int32_t, int32_t) noexcept>(SetUnitStat)(u, stat, value, layer);
+		if (stat != StatMapLevel) {
+			d2r::Engine<void (*)(Unit*, int32_t, int32_t, int32_t) noexcept>(SetUnitStat)(u, stat, value, layer);
+		}
 	});
 	uint8_t use[UsePacketSize];
 	std::memcpy(use, packet, sizeof(use));
