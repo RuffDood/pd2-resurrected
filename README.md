@@ -8,7 +8,7 @@ Project Diablo II rebuilt as a Diablo II: Resurrected mod.
 
 ## Requirements
 
-- Windows and Diablo II: Resurrected 3.4.0 (build 95032) or 3.3.0 (build 93847) with Reign of the Warlock. One
+- Windows and Diablo II: Resurrected 3.4.0 or 3.3.0 with Reign of the Warlock. One
   release runs on both: D2RLoader runs its own 3.3 engine image with the installed game's data.
 - [D2RLoader](https://d2rloader.net/) 1.3.1-beta.
 
