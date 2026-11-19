@@ -354,6 +354,10 @@ auto KeepCubeLeftovers(Game* game, Unit* player, const uint8_t* record) noexcept
 				continue;
 			}
 			if (d2r::Engine<int32_t (*)(Unit*) noexcept>(ItemQuality)(item) != QualityNormal) {
+				// useitem keeps this stack whole (#1438)
+				if (record[CubeOutType] == 0xfe) {
+					continue;
+				}
 				plog::Info("stacks: refused, a stack the row leaves units of is not normal quality");
 				return false;  // createItem would remake it without its affixes
 			}
