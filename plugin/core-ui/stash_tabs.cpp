@@ -15,6 +15,9 @@
 // Maps page. Both tabs show the stock cube (advancedstash_horadriccube, which the stash shows itself on its RotW
 // tabs) at its RotW spot, and hides the stock page arrows while one of our tabs is up, so its page cannot change.
 // D2R keeps the tab and page on show across a stash close, so the state stays until a stock tab or a new game.
+// The stock Shared tab never pages onto the reserved pages (#1653): no SDK service reads the stash page and this
+// loader's widget service has no getText for its label, so the page is counted from the arrows (ours and the player's),
+// and a player's Right arrow that would reach a reserved page is consumed; leaving our tab pages the stash back to page 1.
 #include "stash_tabs.h"
 
 #include "log.h"
@@ -76,6 +79,10 @@ sigscan::Entry SelectTab {"TabBarSelect", "stash", sigscan::Kind::Rip, 15, 19,
                           "eb 03 45 8b ca 45 33 c0 41 8b d1 48 8b cb e8 ?? ?? ?? ?? 48 8b 5c 24 40 48 83 c4 20 5f c3"};
 sigscan::Entry* const Sigs[] = {&FetchPanel, &FindChild, &SelectTab};
 bool g_select = false;
+// UI thread: the shared page on show (0-based), counted from the arrows; a new game starts on page 0.
+// shortcut: a page change that sends no arrow (another plugin's jump) is not counted, and the general pages after the
+// reserved ones (add_shared_tabs above 15) are out of the Shared tab's reach; read the page if the SDK gains a read.
+uint32_t g_page = 0;
 bool g_wantShared = false;  // UI thread: our tab was clicked; the next frame selects the stock Shared tab
 
 // The stock BankTabs to Shared (index 1), as a click on it: the stash gets its SelectTab and shows the Shared tab
@@ -98,6 +105,7 @@ void SelectShared() noexcept {
 
 // The stash, already on its Shared tab, to shared page `page` (0-based)
 void OpenPage(uint32_t page) noexcept {
+	g_page = page;
 	g_head = g_tail = 0;
 	for (int32_t i = 0; i < LeftPresses; ++i) {
 		g_queue[g_tail++] = "SharedStashLeft";
@@ -218,7 +226,10 @@ void InitNames() noexcept {
 // handling of the message then hides the ones its tab does not use
 void Leave() noexcept {
 	g_view = View::None;
-	g_head = g_tail = 0;
+	OpenPage(0);  // the stash is still on Shared under ours: page 1 now, so a stock Shared tab never opens on a reserved page
+	while (g_head < g_tail) {
+		Send();
+	}
 	stash_affinity::SetTabOpen(false);
 	Show(g_navigation, true);
 	Show(g_cube, false);
@@ -232,6 +243,19 @@ auto OnUiMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::UiMessage
 	}
 	const char* text = event->text != nullptr ? event->text : "";
 	if (std::strcmp(event->target, "BankPanelMessage") == 0) {
+		if (!g_dispatching && g_view == View::None && std::strcmp(event->command, "SharedStashRight") == 0) {
+			if (g_page + 1 >= aff::FirstReservedPage) {  // the reserved pages are the Maps and Bossing tabs'
+				plog::Info("stash tabs: Shared right arrow at page %u stops (pages %u-%u are reserved)", g_page + 1,
+				           aff::FirstReservedPage + 1, aff::LastReservedPage + 1);
+				return Action::Consume;
+			}
+			++g_page;
+			return Action::Continue;
+		}
+		if (!g_dispatching && g_view == View::None && std::strcmp(event->command, "SharedStashLeft") == 0) {
+			g_page -= g_page > 0 ? 1 : 0;
+			return Action::Continue;
+		}
 		if (g_dispatching || std::strcmp(event->command, "SelectTab") != 0) {
 			return Action::Continue;
 		}
@@ -252,7 +276,6 @@ auto OnUiMessage(const D2RL::PluginContext*, const D2RL::SharedEvents::UiMessage
 		g_wantShared = g_select;
 	} else if (std::strcmp(what, "Shared") == 0) {  // the stock Shared tab, already selected under ours: its first page
 		Leave();
-		OpenPage(0);
 		Log("Shared");
 	} else if (std::strcmp(what, "Hidden") != 0) {  // Hidden: our bars' off-screen tab 0 (an empty message asserts, #1649)
 		Click(what);
@@ -265,7 +288,7 @@ void OnFrame(const D2RL::PluginContext*, const D2RL::Overlay::Frame*, void*) noe
 	++g_frames;
 	if (g_reset.exchange(false)) {
 		g_view = View::None;
-		g_head = g_tail = 0;
+		g_head = g_tail = g_page = 0;
 		stash_affinity::ShowBase(0);
 		stash_affinity::SetTabOpen(false);
 	}
