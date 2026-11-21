@@ -1,0 +1,1 @@
+- PD2 inventory hotkeys: Ctrl/Shift+right click drop, stash, Cube; configurable. (#1567)
