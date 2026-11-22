@@ -19,7 +19,8 @@
 // single player and on the host only; upgrade with a plugin message to the host if online play needs it.
 // shortcut: no chat line when a page is full (the item just comes back to the inventory, and the log says why); add
 // one with a string if players miss it.
-// shortcut: a currency that would pass its cell's stack of MaxStack comes back whole instead of topping the stack up.
+// shortcut: a quick-moved currency that would pass its cell's stack of MaxStack comes back whole instead of topping the
+// stack up (a hand drop tops it up, #1758).
 #include "stash_affinity.h"
 
 #include "log.h"
@@ -224,10 +225,26 @@ void CollectMapStats(const D2RL::PluginContext*, void* native, void* user) noexc
 	                       *static_cast<pd2::mapstack::Saved*>(user));
 }
 
-// Core-rules' rule (#1326): only normal-quality maps with equal stats stack, so Route must not merge any other pair.
+// Core-rules' rule (#1326): two maps stack only when both are normal quality with equal non-quantity stats, or a rare's
+// mods would go into the stack. nullptr when they may, else the reason; shared by Route (MapRefusal) and the hand stack.
+// same is 1 or 0 once the stats were compared, else -1.
+auto MapStatsRefusal(const items::ItemInfo& a, const items::ItemInfo& b, int32_t& same) noexcept -> const char* {
+	static pd2::mapstack::Saved sa, sb;  // game thread only; too big for the stack
+	same = -1;
+	if (a.quality != items::Quality::Normal || b.quality != items::Quality::Normal) {
+		return "quality";
+	}
+	if (g_items->editNativeItem(g_context, a.handle, CollectMapStats, &sa) != items::Result::Success ||
+	    g_items->editNativeItem(g_context, b.handle, CollectMapStats, &sb) != items::Result::Success) {
+		return "stats unread";
+	}
+	same = pd2::mapstack::SameStats(sa, sb) ? 1 : 0;
+	return same == 1 ? nullptr : "stats";
+}
+
+// Route's merge test: the stack on its page and cell, a sum that fits, then MapStatsRefusal.
 // nullptr when the pair stacks, else the reason it does not; one log line per candidate keeps the decision readable.
 auto MapRefusal(const items::ItemInfo& a, const items::ItemInfo& b, uint32_t stackPage, bool inView, bool shown) noexcept -> const char* {
-	static pd2::mapstack::Saved sa, sb;  // game thread only; too big for the stack
 	const char* reason = nullptr;
 	int32_t same = -1;
 	if (b.sharedStashPage != stackPage || !InCell(b.x, b.y) || (shown && !inView)) {
@@ -236,11 +253,8 @@ auto MapRefusal(const items::ItemInfo& a, const items::ItemInfo& b, uint32_t sta
 		reason = "quality";
 	} else if (Quantity(b.handle) + Quantity(a.handle) > MaxStack) {
 		reason = "count";
-	} else if (g_items->editNativeItem(g_context, a.handle, CollectMapStats, &sa) != items::Result::Success ||
-	           g_items->editNativeItem(g_context, b.handle, CollectMapStats, &sb) != items::Result::Success) {
-		reason = "stats unread";
-	} else if (same = pd2::mapstack::SameStats(sa, sb) ? 1 : 0; same == 0) {
-		reason = "stats";
+	} else {
+		reason = MapStatsRefusal(a, b, same);
 	}
 	plog::Info("affinity: map %08x (quality %u) onto the stack at page %u cell %d,%d (quality %u): stats equal %d, %s%s", a.code,
 	           static_cast<uint32_t>(a.quality), b.sharedStashPage, b.x, b.y, static_cast<uint32_t>(b.quality), same,
@@ -248,15 +262,31 @@ auto MapRefusal(const items::ItemInfo& a, const items::ItemInfo& b, uint32_t sta
 	return reason;
 }
 
+// The hand stack's test (#1758): any other stackable always; a map by MapStatsRefusal
+auto StackAllowed(const items::ItemInfo& a, const items::ItemInfo& b) noexcept -> bool {
+	int32_t same = -1;
+	return !pd2::mapstack::IsMapCode(a.code) || MapStatsRefusal(a, b, same) == nullptr;
+}
+
 // Into the same currency's stack on its cell; Conflict when the sum passes a stack. editItem and destroyItem refuse a
 // shared-stash item on this loader (Unsupported, Slot2), so both go to the inventory, the counts are read there, the
 // stack takes the sum, the incoming item goes and the stack moves back onto its cell. A failed step puts things back;
-// the sum is never doubled.
-auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& stack) noexcept -> items::Result {
+// the sum is never doubled. topUp (a hand drop, #1758): the stack takes what fits up to MaxStack and the rest stays on the
+// cursor item, as D2R's own stack message does (0x4c1940). The counts are checked before anything moves: a full stack
+// refuses with no change (D2R refuses that message silently too), since the stack's round trip with nothing sent for the
+// cursor item left it invisible on the client (#1758).
+auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& stack, bool topUp = false) noexcept -> items::Result {
 	const items::ItemDestination bag {.structSize = items::ItemDestinationSize, .container = C::Inventory,
 	                                  .placement = items::Placement::Automatic};
 	const uint32_t page = stack.sharedStashPage;
 	const int32_t x = stack.x, y = stack.y;
+	// an unread count (0) is left to the read after the move below
+	if (const int32_t was = Quantity(stack.handle), more = Quantity(item.handle);
+	    was > 0 && more > 0 && (topUp ? aff::ToppedUp(was, more, MaxStack).stack : aff::MergedCount(was, more, MaxStack)) == 0) {
+		plog::Info("affinity: %08x onto the stack on page %u cell %d,%d (%d + %d): it does not fit; nothing moved", item.code, page,
+		           x, y, was, more);
+		return items::Result::Conflict;
+	}
 	if (const auto out = Move(player, stack.handle, bag); out != items::Result::Success) {
 		return out;
 	}
@@ -275,12 +305,14 @@ auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& st
 			item.container = C::Inventory;
 		}
 	}
-	int32_t have = 0, add = 0, sum = 0;
+	int32_t have = 0, add = 0, sum = 0, rest = 0;
 	if (result == items::Result::Success) {
 		step = "count";
 		have = Quantity(stack.handle);
 		add = Quantity(item.handle);
-		sum = aff::MergedCount(have, add, MaxStack);
+		const aff::TopUp up = topUp ? aff::ToppedUp(have, add, MaxStack) : aff::TopUp {aff::MergedCount(have, add, MaxStack), 0};
+		sum = up.stack;
+		rest = up.rest;
 		if (sum == 0) {  // a full stack (Conflict) or an unread count (Unsupported): the edit would lose items
 			result = have < 1 || add < 1 ? items::Result::Unsupported : items::Result::Conflict;
 		}
@@ -298,8 +330,20 @@ auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& st
 			g_items->editItem(g_context, player, stack.handle, &edit);
 		}
 		if (result == items::Result::Success) {
-			step = "destroy";
-			result = g_items->destroyItem(g_context, player, item.handle, items::SocketedItemPolicy::RejectIfNotEmpty);
+			if (rest > 0) {  // the rest stays on the cursor item, verified as the stack is
+				step = "rest";
+				items::ItemEdit left = edit;
+				left.quantity = static_cast<uint32_t>(rest);
+				result = g_items->editItem(g_context, player, item.handle, &left);
+				if (result == items::Result::Success && Quantity(item.handle) != rest) {
+					result = items::Result::Unsupported;
+					left.quantity = static_cast<uint32_t>(add);
+					g_items->editItem(g_context, player, item.handle, &left);
+				}
+			} else {
+				step = "destroy";
+				result = g_items->destroyItem(g_context, player, item.handle, items::SocketedItemPolicy::RejectIfNotEmpty);
+			}
 			if (result != items::Result::Success) {
 				edit.quantity = static_cast<uint32_t>(have);  // undo, so nothing is made from nothing
 				if (const auto undo = g_items->editItem(g_context, player, stack.handle, &edit); undo != items::Result::Success) {
@@ -315,11 +359,13 @@ auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& st
 		           step, static_cast<uint32_t>(result), have, add, static_cast<uint32_t>(back));
 		return result;  // Route sends the incoming item back to the inventory
 	}
-	item.code = 0;  // gone: no later step of this pass reads it
+	if (rest == 0) {
+		item.code = 0;  // gone: no later step of this pass reads it
+	}
 	stack.quantity = sum;
 	++g_merged;
-	plog::Info("affinity: %08x x%d merged with the stack on page %u cell %d,%d (now %d; back on its cell: result %u)",
-	           stack.code, add, page, x, y, sum, static_cast<uint32_t>(back));
+	plog::Info("affinity: %08x x%d merged with the stack on page %u cell %d,%d (now %d, %d left on the cursor; back on its cell: result %u)",
+	           stack.code, add - rest, page, x, y, sum, rest, static_cast<uint32_t>(back));
 	return items::Result::Success;  // a failed move back leaves the whole stack in the inventory: nothing lost
 }
 
@@ -337,7 +383,8 @@ auto FindStored(const D2RL::PluginContext*, const items::ItemInfo* item, void* u
 }
 
 // Game thread (#1744): a hand drop's 0x21, which D2R cannot resolve on a Maps or Bossing page. The cursor item is
-// destroyed only by Merge's last step after the stack holds the sum, so a failure anywhere leaves it on the cursor.
+// destroyed (or, past a full stack, cut to the rest) only by Merge's last step after the stack holds the sum, so a failure
+// anywhere leaves it on the cursor.
 static_assert(sizeof(void*) == 8, "StackOnto packs both runtime ids into the callback's pointer");
 void StackNow(const D2RL::PluginContext*, void* user) noexcept {
 	const auto ids = reinterpret_cast<uintptr_t>(user);
@@ -357,12 +404,12 @@ void StackNow(const D2RL::PluginContext*, void* user) noexcept {
 	const uint32_t page = g_viewPage.load();
 	if (on.container != C::SharedStash || on.sharedStashPage != page || !aff::Stacks(item.code) ||
 	    aff::Normal(item.code) != aff::Normal(on.code) ||
-	    !aff::AtHome(aff::HomeOf(on.code), on.code, g_want.load(), true, on.sharedStashPage, on.x, on.y)) {
-		plog::Info("affinity: hand stack of %08x onto %08x (page %u cell %d,%d): not its own stack on page %u; it stays on the cursor",
+	    !aff::AtHome(aff::HomeOf(on.code), on.code, g_want.load(), true, on.sharedStashPage, on.x, on.y) || !StackAllowed(item, on)) {
+		plog::Info("affinity: hand stack of %08x onto %08x (page %u cell %d,%d): not its own stack on page %u, or maps that do not stack; it stays on the cursor",
 		           item.code, on.code, on.sharedStashPage, on.x, on.y, page);
 		return;
 	}
-	if (Merge(player, item, stack.info) == items::Result::Success) {
+	if (Merge(player, item, stack.info, true) == items::Result::Success) {
 		++g_handStacked;
 	}  // Merge logs a failure; the cursor item is kept then
 }

@@ -53,6 +53,14 @@ int main() {
 	pd2::mapstack::Collect(&src, 600, 70, Read, saved);
 	check("collect skips the quantity", saved.count == 2);
 	check("apply sets both stats", pd2::mapstack::Apply(&bare, saved, set) == 2 && diff(src, bare) == 70 - 70 - 1);
+	pd2::mapstack::Saved bareSaved, otherSaved, pairSaved, singleSaved;
+	pd2::mapstack::Collect(&bare, 600, 70, Read, bareSaved);
+	pd2::mapstack::Collect(&other, 600, 70, Read, otherSaved);
+	pd2::mapstack::Collect(&pair, 600, 70, Read, pairSaved);
+	pd2::mapstack::Collect(&single, 600, 70, Read, singleSaved);
+	check("same stats are the same (#1758)", pd2::mapstack::SameStats(saved, bareSaved) && pd2::mapstack::SameStats(pairSaved, singleSaved));
+	check("another Area Level or a missing event is not", !pd2::mapstack::SameStats(singleSaved, otherSaved) &&
+	                                                         !pd2::mapstack::SameStats(saved, singleSaved));
 	pd2::mapstack::Apply(&kept, saved, set);
 	pd2::mapstack::Apply(&kept, saved, set);
 	check("apply twice, or over kept stats, is the same", diff(src, kept) == -1);
