@@ -1168,6 +1168,11 @@ auto SrvDoSplash(Game* game, Unit* unit, int32_t skillId, int32_t level) noexcep
 	if (struck == nullptr && path != nullptr && At<int32_t>(unit, d2r::rva::UnitType) <= d2r::rva::UnitMonster) {
 		struck = At<Unit*>(path, d2r::rva::PathTargetUnit);
 	}
+	if (struck == nullptr && pd2::HotSample(g_splashes)) {
+		void* current = d2r::Engine<void* (*)(Unit*) noexcept>(d2r::rva::CurrentSkill)(unit);
+		plog::Info("splash: skill %d level %d refused: no struck unit (current skill %d)", skillId, level,
+		           current != nullptr ? UnitSkillIdOf(current) : -1);
+	}
 	return Splash(game, unit, struck, skillId, level);
 }
 
@@ -3684,6 +3689,64 @@ auto AuraEventReviveSplash(Game* game, int32_t event, Unit* unit, Unit* target, 
 	}
 	return cast != 0 ? 1 : 0;
 }
+
+// --- Splash on Whirlwind and Blade Dance hits (#1812) ---------------------------------------------------------------
+// Whirlwind's start (srvst 38, 0x56a420 via 0x48e820) sets state uninterruptable for the whole spin, and D2R's
+// skill-on-hit casts refuse an attacker in it (0x5896e0, which D2R's item event 20, 0x583b30, casts through). D2RCore
+// dispatches item events itself and refuses there too: in game no item_splashonhit splash came on a Whirlwind hit, and
+// a hook on 0x583b30 never ran (D2RCore does not call it). 1.13c has the same refusal (D2Game 0x6fd117e0), and PD2
+// removes it: its patch list (0x1049c640: D2Game +0xf181d, 0x33) turns the TEST EAX,EAX after the state 54 check into
+// XOR EAX,EAX, for every attacker (player, merc, monster). Its skill-on-hit (0x103473a0) casts through 0x6fd117e0 for
+// skills whose ItemTarget is not 5 (splash's is 0). So on any melee hit (event 5, relayed by item_rules' HitEvent) of
+// an attacker in state 54 each splash node rolls its chance as 0x583b30 does and the splash is called on the struck
+// unit, as Revive's event does. The damage% is PD2's (0x10305eb0, players only: Whirlwind 151, Blade Dance PD2 380 =
+// merged 452 take calc1; mercs and monsters, MonWhirlwind 495 and UberTalicWhirlwind 579 included, 0 on Attack).
+// shortcut: other skills on hit still refuse a spinning attacker (PD2 casts them too), #1889
+constexpr int32_t StatSplashOnHit = 412, StatMapMonSplash = 480;  // item_splashonhit, map_mon_splash (merged)
+constexpr int EventNodeLayer = 0x10;                               // the node's stat layer (seen in game: 412, 0x6b81)
+std::atomic<uint32_t> g_spinSplashes {0};
+
+auto Spinning(Unit* unit) noexcept -> bool {
+	return d2r::Engine<int32_t (*)(Unit*, int32_t) noexcept>(d2r::rva::UnitHasState)(unit, Uninterruptable) != 0;
+}
+
+}  // namespace
+
+auto SpinSplashes(Game* game, int32_t event, Unit* unit, Unit* target, const uint8_t* damage) noexcept -> void {
+	using namespace d2r::rva;
+	// The splash's own hits raise event 5 again while the spin lasts: they must not splash in turn
+	static thread_local bool t_spinSplashing = false;
+	if (t_spinSplashing || game == nullptr || unit == nullptr || target == nullptr ||
+	    (damage != nullptr && (damage[0] & 0x20) == 0) || !Spinning(unit)) {
+		return;
+	}
+	t_spinSplashing = true;
+	const uint8_t* tables = d2r::Engine<const uint8_t* (*)(uint32_t) noexcept>(DataTables)(d2r::DataFlag(game));
+	for (auto* node = At<uint8_t*>(unit, UnitEventNodes); node != nullptr; node = At<uint8_t*>(node, EventNodeNext)) {
+		const int32_t stat = At<int32_t>(node, EventNodeStat);
+		if (At<uint16_t>(node, EventNodeEvent) != event || (stat != StatSplashOnHit && stat != StatMapMonSplash)) {
+			continue;
+		}
+		const uint32_t layer = At<uint16_t>(node, EventNodeLayer);
+		const int32_t chance = d2r::Engine<int32_t (*)(Unit*, int32_t, int32_t) noexcept>(UnitStat)(unit, stat, layer);
+		const auto roll = static_cast<int32_t>(d2r::RandomBelow(d2r::Engine<uint32_t* (*)(Unit*) noexcept>(UnitSeed)(unit), 100));
+		if (chance < 1 || roll >= chance) {
+			continue;
+		}
+		const auto skillId = static_cast<int32_t>(layer >> (At<uint32_t>(tables, TablesSkillLayerShift) & 0x1f));
+		const auto level = static_cast<int32_t>(layer & At<uint32_t>(tables, TablesSkillLayerMask));
+		const int64_t cast = Splash(game, unit, target, skillId, level);
+		if (pd2::HotSample(g_spinSplashes)) {
+			plog::Info("spin splash: attacker type %d stat %d layer %u skill %d level %d chance %d roll %d on unit type %d: "
+			           "cast %lld, %u so far",
+			           At<int32_t>(unit, UnitType), stat, layer, skillId, level, chance, roll,
+			           At<int32_t>(target, UnitType), static_cast<long long>(cast), g_spinSplashes.load());
+		}
+	}
+	t_spinSplashing = false;
+}
+
+namespace {
 
 // Revive's do (srvdofunc 58): D2R's own, then Revive's aura events go on the revived monster. D2R's Revive never
 // registers them, so without this event 32 never fires. The corpse is revived in place (seen in game: same unit,
