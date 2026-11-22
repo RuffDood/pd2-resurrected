@@ -116,7 +116,13 @@ map and `t14` Sanatorium is tier 1. The research's "T4" and "T5" are only the it
   PD2's own invader brain (`AiThink4.cpp`) replaces them in [MS11](https://github.com/synpoox/pd2-resurrected/issues/225).
   An invader's gear is rolled from PD2's `Invader*` treasure classes when the portal spawns it and held until it dies;
   then exactly those items drop, with its ear ([#1708](https://github.com/synpoox/pd2-resurrected/issues/1708)). An invader that dies
-  holding nothing (spawned another way) rolls at death.
+  holding nothing (spawned another way) rolls at death. The rolled gear also sets its look, so it wears what it drops
+  (`plugin/common/invader_dress.h`): the helm, the body armor's light/medium/heavy parts, the weapons, the shield and the
+  Necromancer's head, and nothing in a hand or shield the roll left empty. D2R draws a hand empty, in HD and legacy
+  alike, when the class's one pose has no legacy art for its token, so such a base is shown as the nearest (`docs/deviations.md`).
+  For game checks, `PD2R_INVADERS=<class>:<set>,...` in the game's environment picks each spawn's class (0 Amazon to
+  6 Sorceress) and weapon set (the `ClassDrops` case: Amazon 0 spear, 1 bow, 2 crossbow, 3 javelin; Barbarian 0 two-hander,
+  1 thrown, 2 two-handed swords; Sorceress 0 staff, 1 orb), in turn.
 - **Plugins:** `core-events` (Shared) holds the code that belongs only to the map system: opening maps, map stats, cube
   op 30, map events and invaders. It is a plugin of its own because the map system is large enough to be used outside
   this project ([ADR 0004](../adr/0004-plugins-split-by-multiplayer-scope.md), amended). Rules the map system shares with
