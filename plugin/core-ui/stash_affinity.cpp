@@ -594,7 +594,16 @@ void Withdraw(D2RL::PlayerHandle player, const Noted& noted) noexcept {
 			split = split == items::Result::Success ? items::Result::Conflict : split;
 		}
 	}
-	const bool home = (split == items::Result::Success || busy) && Route(player, item);
+	// An item with no home (Uber Ancients keys, #1785) has nowhere to route to: the rest stays in the inventory
+	// A busy cursor, or a second homeless stack in the same pass, stays whole and is not retried. The guard also keeps
+	// Route off At(0, -1, -1), out of bounds for a homeless code.
+	const bool homeless = aff::HomeOf(item.code).category == aff::Category::None;
+	const bool home = (split == items::Result::Success || busy) && !homeless && Route(player, item);
+	if (homeless && split == items::Result::Success) {  // publishes the rest's native count (SetQuantity); the client still draws 1
+		const items::ItemDestination back {.structSize = items::ItemDestinationSize, .container = C::Inventory,
+		                                   .placement = items::Placement::Automatic};
+		Move(player, item.handle, back);
+	}
 	// #1772: the source's move home made it the client's cursor item and put it down (ResendCursor), so the piece (or a
 	// busy cursor's item) was held but not drawn; send the cursor item again after that last move
 	items::ItemInfo cursor {.structSize = items::ItemInfoSize};
@@ -680,6 +689,10 @@ void Tidy(D2RL::PlayerHandle player) noexcept {
 		if (moved == items::Result::Success || !g_tidyFailed.exchange(true)) {  // a full inventory logs once, not every pass
 			plog::Info("affinity: %08x on page %u at %d,%d belongs to no reserved tab: back to the inventory (result %u)",
 			           item.code, item.sharedStashPage, item.x, item.y, static_cast<uint32_t>(moved));
+		}
+		// a stack past the inventory cap is split now, not left whole (#1785)
+		if (moved == items::Result::Success && aff::Stacks(item.code) && Quantity(item.handle) > aff::WithdrawMax) {
+			Withdraw(player, Noted {item.runtimeId, item.code, item.handle});
 		}
 	}
 }
