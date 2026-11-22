@@ -55,13 +55,13 @@ constexpr D2RL::Inventory::ItemFilter InventoryOnly {.structSize = D2RL::Invento
                                                      .containerMask = items::ContainerBit(C::Inventory)};
 constexpr D2RL::Inventory::ItemFilter StashOnly {.structSize = D2RL::Inventory::ItemFilterSize, .containerMask = Stashes};
 constexpr uint32_t ReservedPages = aff::LastReservedPage + 1 - aff::FirstReservedPage;
-constexpr int32_t MaxStack = 50;  // misc.txt maxstack of every MapMaterials code (tools/tests/test_stash_affinity.py)
 constexpr uint32_t TidyEvery = 25;  // updates between tidies while a reserved tab is open
 
 // The routed items in the inventory at the last update (game thread only). An inventory holds at most 10 x 8 items.
 struct Noted {
 	uint32_t runtimeId;
 	uint32_t code;
+	D2RL::ItemHandle handle;  // good for the update that noted it
 };
 constexpr uint32_t MaxNoted = 128;
 struct NotedList {
@@ -69,6 +69,7 @@ struct NotedList {
 	Noted item[MaxNoted];
 };
 NotedList g_noted;
+NotedList g_kept;  // big stacks Withdraw could not send home: not tried again while they stay in the inventory (#1763)
 
 // One stash pass (game thread only): the noted items that left the inventory, as found in a stash, and the reserved
 // pages' items with the cells they use (items there are 1 x 1, but for the Bossing page's)
@@ -121,7 +122,7 @@ void Use(uint32_t page, int32_t x, int32_t y, bool used) noexcept {
 auto NoteInventory(const D2RL::PluginContext*, const items::ItemInfo* item, void* user) noexcept -> D2RL::Inventory::IterationAction {
 	auto* list = static_cast<NotedList*>(user);
 	if (aff::HomeOf(item->code).category != aff::Category::None && list->count < MaxNoted) {
-		list->item[list->count++] = {item->runtimeId, item->code};
+		list->item[list->count++] = {item->runtimeId, item->code, item->handle};
 	}
 	return D2RL::Inventory::IterationAction::Continue;
 }
@@ -218,6 +219,26 @@ auto Quantity(D2RL::ItemHandle item) noexcept -> int32_t {
 	return g_items->editNativeItem(g_context, item, ReadQuantity, &count) == items::Result::Success ? count : 0;
 }
 
+void WriteQuantity(const D2RL::PluginContext*, void* native, void* user) noexcept {
+	d2r::Engine<void (*)(d2r::Unit*, int32_t, int32_t, int32_t) noexcept>(d2r::sig::SetUnitStat)(
+	    static_cast<d2r::Unit*>(native), d2r::rva::StatQuantity, *static_cast<int32_t*>(user), 0);
+}
+
+// Sets a stack's count, verified by the stat. editItem refuses a count past the item's maxstack (Slot5, #1763: result 2
+// for 50 + 50), and no SDK call sets more, so a stash stack past 50 gets stat 70 natively (SetUnitStat, by signature)
+// through editNativeItem; the caller's next move of the item publishes it to the client.
+auto SetQuantity(D2RL::PlayerHandle player, D2RL::ItemHandle item, int32_t count) noexcept -> items::Result {
+	const items::ItemEdit edit {.structSize = items::ItemEditSize, .fields = items::EditFieldBit(items::EditField::Quantity),
+	                            .quantity = static_cast<uint32_t>(count)};
+	if (g_items->editItem(g_context, player, item, &edit) == items::Result::Success && Quantity(item) == count) {
+		return items::Result::Success;
+	}
+	if (d2r::sig::SetUnitStat.rva == 0 || g_items->editNativeItem(g_context, item, WriteQuantity, &count) != items::Result::Success) {
+		return items::Result::Unsupported;
+	}
+	return Quantity(item) == count ? items::Result::Success : items::Result::Unsupported;
+}
+
 // A map's non-quantity stats (Area Level, forced event, mods), read off the native item
 void CollectMapStats(const D2RL::PluginContext*, void* native, void* user) noexcept {
 	pd2::mapstack::Collect(static_cast<d2r::Unit*>(native), d2r::rva::ItemStatCostRows, d2r::rva::StatQuantity,
@@ -251,7 +272,7 @@ auto MapRefusal(const items::ItemInfo& a, const items::ItemInfo& b, uint32_t sta
 		reason = "page";
 	} else if (a.quality != items::Quality::Normal || b.quality != items::Quality::Normal) {
 		reason = "quality";
-	} else if (Quantity(b.handle) + Quantity(a.handle) > MaxStack) {
+	} else if (Quantity(b.handle) + Quantity(a.handle) > aff::StackCap(a.code)) {
 		reason = "count";
 	} else {
 		reason = MapStatsRefusal(a, b, same);
@@ -280,6 +301,7 @@ auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& st
 	                                  .placement = items::Placement::Automatic};
 	const uint32_t page = stack.sharedStashPage;
 	const int32_t x = stack.x, y = stack.y;
+	const int32_t MaxStack = aff::StackCap(stack.code);  // 255, or 50 for a map (#1763)
 	// an unread count (0) is left to the read after the move below
 	if (const int32_t was = Quantity(stack.handle), more = Quantity(item.handle);
 	    was > 0 && more > 0 && (topUp ? aff::ToppedUp(was, more, MaxStack).stack : aff::MergedCount(was, more, MaxStack)) == 0) {
@@ -317,36 +339,25 @@ auto Merge(D2RL::PlayerHandle player, items::ItemInfo& item, items::ItemInfo& st
 			result = have < 1 || add < 1 ? items::Result::Unsupported : items::Result::Conflict;
 		}
 	}
-	items::ItemEdit edit {.structSize = items::ItemEditSize, .fields = items::EditFieldBit(items::EditField::Quantity),
-	                      .quantity = static_cast<uint32_t>(sum)};
 	if (result == items::Result::Success) {
+		// the loader misreports these items' quantity (#1628): SetQuantity trusts the stat, not the edit's result, before destroying
 		step = "edit";
-		result = g_items->editItem(g_context, player, stack.handle, &edit);
-		if (result == items::Result::Success && Quantity(stack.handle) != sum) {
-			// the loader misreports these items' quantity (#1628): trust the stat, not the edit's result, before destroying
-			step = "verify";
-			result = items::Result::Unsupported;
-			edit.quantity = static_cast<uint32_t>(have);
-			g_items->editItem(g_context, player, stack.handle, &edit);
+		if (result = SetQuantity(player, stack.handle, sum); result != items::Result::Success) {
+			SetQuantity(player, stack.handle, have);
 		}
 		if (result == items::Result::Success) {
 			if (rest > 0) {  // the rest stays on the cursor item, verified as the stack is
 				step = "rest";
-				items::ItemEdit left = edit;
-				left.quantity = static_cast<uint32_t>(rest);
-				result = g_items->editItem(g_context, player, item.handle, &left);
-				if (result == items::Result::Success && Quantity(item.handle) != rest) {
-					result = items::Result::Unsupported;
-					left.quantity = static_cast<uint32_t>(add);
-					g_items->editItem(g_context, player, item.handle, &left);
+				if (result = SetQuantity(player, item.handle, rest); result != items::Result::Success) {
+					SetQuantity(player, item.handle, add);
 				}
 			} else {
 				step = "destroy";
 				result = g_items->destroyItem(g_context, player, item.handle, items::SocketedItemPolicy::RejectIfNotEmpty);
 			}
 			if (result != items::Result::Success) {
-				edit.quantity = static_cast<uint32_t>(have);  // undo, so nothing is made from nothing
-				if (const auto undo = g_items->editItem(g_context, player, stack.handle, &edit); undo != items::Result::Success) {
+				// undo, so nothing is made from nothing
+				if (const auto undo = SetQuantity(player, stack.handle, have); undo != items::Result::Success) {
 					plog::Warn("affinity: %08x undo failed (result %u): the stack may hold %d with the item still there", item.code,
 					           static_cast<uint32_t>(undo), sum);
 				}
@@ -468,10 +479,12 @@ void SyncReserved(const items::ItemInfo& item) noexcept {
 	}
 }
 
-void Route(D2RL::PlayerHandle player, items::ItemInfo item) noexcept {
+// True when the item is home (or merged there); false when it went back to the inventory
+// topUp: a fixed cell's stack takes what fits and the rest stays on the item (Withdraw, #1763)
+auto Route(D2RL::PlayerHandle player, items::ItemInfo item, bool topUp = false) noexcept -> bool {
 	const aff::Home home = aff::HomeOf(item.code);
 	if (aff::AtHome(home, item.code, g_shown, item.container == C::SharedStash, item.sharedStashPage, item.x, item.y)) {
-		return;
+		return true;
 	}
 	items::Result moved = items::Result::Conflict;
 	if (home.category == aff::Category::Maps) {
@@ -489,7 +502,7 @@ void Route(D2RL::PlayerHandle player, items::ItemInfo item) noexcept {
 		if (moved == items::Result::Success) {
 			SyncReserved(item);
 			++g_routed;
-			return;
+			return true;
 		}
 		const aff::Cell cell = shown ? FreeMapCell() : aff::Cell {};
 		moved = cell.x >= 0 ? MoveTo(player, item, aff::MapsPage, cell.x, cell.y) : ToStorage(player, item);
@@ -501,13 +514,13 @@ void Route(D2RL::PlayerHandle player, items::ItemInfo item) noexcept {
 				on = -2;  // used by an item this pass did not read
 			}
 		} else if (on >= 0 && aff::Stacks(item.code) && aff::Normal(g_pass.reserved[on].code) == aff::Normal(item.code)) {
-			moved = Merge(player, item, g_pass.reserved[on]);
+			moved = Merge(player, item, g_pass.reserved[on], topUp);
 		}
 	}
 	if (moved == items::Result::Success) {
 		SyncReserved(item);
 		++g_routed;
-		return;
+		return true;
 	}
 	// The page or cell is full or missing (add_shared_tabs below aff::RequiredExtraTabs): back to the inventory
 	const items::ItemDestination back {.structSize = items::ItemDestinationSize, .container = C::Inventory,
@@ -520,6 +533,83 @@ void Route(D2RL::PlayerHandle player, items::ItemInfo item) noexcept {
 		plog::Info("affinity: the reserved pages are shared tabs %u-%u; set [d2rcore.stash] add_shared_tabs to at least %u",
 		           aff::FirstReservedPage, aff::LastReservedPage, aff::RequiredExtraTabs);
 	}
+	return false;
+}
+
+// A stack past aff::WithdrawMax new in the inventory (#1763: Ctrl+click out of the stash, or a hand pick-up put down):
+// WithdrawMax of it split onto the cursor (the SDK moves no cursor item, so it stays there), the rest back home through
+// Route, topping the cell's stack up. A busy cursor sends the whole stack home; a failed split keeps it in the inventory
+// (it could never be taken out otherwise) and logs the result. Only counts move between the two items, checked by reading them back.
+void Withdraw(D2RL::PlayerHandle player, const Noted& noted) noexcept {
+	items::ItemInfo item {.structSize = items::ItemInfoSize};
+	if (g_items->getItemInfo(g_context, noted.handle, &item) != items::Result::Success) {
+		return;
+	}
+	const int32_t had = Quantity(item.handle);
+	D2RL::ItemHandle held = D2RL::InvalidItemHandle;
+	items::Result split = items::Result::Conflict;
+	bool busy = true, sums = true;
+	if (g_inventory->getCursorItem(g_context, player, &held) == D2RL::Inventory::Result::NotFound) {  // NotFound: an empty cursor
+		const items::SplitStackRequest request1 {.structSize = items::SplitStackRequestSize, .player = player,
+		                                         .sourceItem = item.handle, .quantity = 1};
+		items::SplitStackResult result {.structSize = items::SplitStackResultSize};
+		busy = false;
+		// splitStack refuses a source past its maxstack (Unavailable, Slot5): split 1 off a stack of 2, then set both counts.
+		// The source's rest is past 50 and only the native write sets it: without SetUnitStat nothing is touched. Every
+		// failure puts the counts back from what is read, never assumed, and keeps the source in the inventory.
+		D2RL::ItemHandle piece = D2RL::InvalidItemHandle;
+		if (d2r::sig::SetUnitStat.rva == 0 || had <= aff::WithdrawMax) {
+			split = items::Result::Unsupported;
+		} else if ((split = SetQuantity(player, item.handle, 2)) != items::Result::Success) {
+			if (SetQuantity(player, item.handle, had) != items::Result::Success) {
+				plog::Warn("affinity: %08x x%d: set to 2 failed and the count could not be put back", item.code, had);
+			}
+		} else if ((split = g_items->splitStack(g_context, &request1, &result)) != items::Result::Success) {
+			if (SetQuantity(player, item.handle, had) != items::Result::Success) {
+				plog::Warn("affinity: %08x x%d: split failed and the count could not be put back", item.code, had);
+			}
+		} else {
+			piece = result.cursorItem;  // source 1, piece 1
+			if ((split = SetQuantity(player, item.handle, had - aff::WithdrawMax)) != items::Result::Success) {
+				if (SetQuantity(player, item.handle, had - 1) != items::Result::Success) {
+					plog::Warn("affinity: %08x x%d: source write failed, piece 1, source %d", item.code, had, Quantity(item.handle));
+				}
+			} else if ((split = SetQuantity(player, piece, aff::WithdrawMax)) != items::Result::Success) {
+				int32_t got = Quantity(piece);  // 0: unreadable
+				if (got <= 0) {
+					const items::ItemEdit one {.structSize = items::ItemEditSize,
+					                           .fields = items::EditFieldBit(items::EditField::Quantity), .quantity = 1};
+					got = g_items->editItem(g_context, player, piece, &one) == items::Result::Success ? Quantity(piece) : 0;
+				}
+				if (got <= 0 || SetQuantity(player, item.handle, had - got) != items::Result::Success) {
+					plog::Warn("affinity: %08x x%d: piece write failed, piece %d, source %d", item.code, had, got, Quantity(item.handle));
+				}
+			}
+		}
+		// self-check, read back: the two items hold what the stack had
+		const int32_t source = Quantity(item.handle), cut = piece != D2RL::InvalidItemHandle ? Quantity(piece) : 0;
+		sums = source + cut == had;
+		if (!sums) {
+			plog::Error("affinity: %08x withdrawal does not add up: had %d, source %d + piece %d", item.code, had, source, cut);
+			split = split == items::Result::Success ? items::Result::Conflict : split;
+		}
+	}
+	const bool home = (split == items::Result::Success || busy) && Route(player, item, true);
+	plog::Info("affinity: %08x x%d taken out of the stash: %d to the cursor (split result %u, counts %s), the rest %s", item.code,
+	           had, split == items::Result::Success ? aff::WithdrawMax : 0, static_cast<uint32_t>(split),
+	           busy ? "untouched" : sums ? "add up" : "DO NOT add up", home ? "back home" : "kept in the inventory");
+	if (!home && g_kept.count < MaxNoted) {
+		g_kept.item[g_kept.count++] = noted;
+	}
+}
+
+auto Listed(const NotedList& list, uint32_t runtimeId) noexcept -> bool {
+	for (uint32_t i = 0; i < list.count; ++i) {
+		if (list.item[i].runtimeId == runtimeId) {
+			return true;
+		}
+	}
+	return false;
 }
 
 // The other bases' maps off the Maps page, then the wanted base's maps onto it
@@ -601,6 +691,7 @@ void Update(const D2RL::PluginContext*, void* user) noexcept {
 	if (generation != g_seen) {  // a new game: runtime ids from the last one mean nothing here
 		g_seen = generation;
 		g_noted.count = 0;
+		g_kept.count = 0;
 		g_shown = 0;
 	}
 	const uint32_t update = ++g_updates;
@@ -623,10 +714,30 @@ void Update(const D2RL::PluginContext*, void* user) noexcept {
 			g_pass.gone.item[g_pass.gone.count++] = g_noted.item[i];
 		}
 	}
-	g_noted = now;
+	// stacks past WithdrawMax new in the inventory (#1763); kept ones that left it may be tried again later
+	// with the stash closed they wait unnoted: a 50 on the cursor out of a panel was dropped by the next click (Slot5)
+	NotedList big;
+	NotedList kept;
+	NotedList noted;
+	const bool open = g_open.load();
+	for (uint32_t j = 0; j < now.count; ++j) {
+		const Noted& n = now.item[j];
+		if (Listed(g_kept, n.runtimeId)) {
+			kept.item[kept.count++] = n;
+		} else if (!Listed(g_noted, n.runtimeId) && aff::StackCap(n.code) > aff::WithdrawMax && aff::Stacks(n.code) &&
+		           Quantity(n.handle) > aff::WithdrawMax) {
+			if (!open) {
+				continue;
+			}
+			big.item[big.count++] = n;
+		}
+		noted.item[noted.count++] = n;
+	}
+	g_kept = kept;
+	g_noted = noted;
 	const uint32_t want = g_want.load();
 	const bool swap = want != g_shown, tidy = g_open.load() && update % TidyEvery == 0;
-	if (g_pass.gone.count == 0 && !swap && !tidy) {
+	if (g_pass.gone.count == 0 && !swap && !tidy && big.count == 0) {
 		return;
 	}
 	g_pass.foundCount = 0;
@@ -651,6 +762,9 @@ void Update(const D2RL::PluginContext*, void* user) noexcept {
 	}
 	for (uint32_t i = 0; i < g_pass.foundCount; ++i) {
 		Route(player, g_pass.found[i]);
+	}
+	for (uint32_t i = 0; i < big.count; ++i) {
+		Withdraw(player, big.item[i]);
 	}
 	if (tidy) {
 		Tidy(player);
@@ -719,13 +833,15 @@ void Install(const D2RL::PluginContext* context, char* report, size_t size) noex
 	g_context = context;
 	const D2RL::LifecycleService* lifecycle = nullptr;
 	// `&`, not `&&`: every service is queried, so the report never blames a missing one by mistake
-	if (!(Query(g_items, D2RL::HasItemServiceField, D2RL::ItemServiceRequiredSize) &
+	if (!(Query(g_items, D2RL::HasItemServiceField, D2RL::ItemServiceSplitStackFieldEnd) &  // Withdraw splits (#1763)
 	      Query(g_inventory, D2RL::HasInventoryServiceField, D2RL::InventoryServiceRequiredSize) &
 	      Query(g_threads, D2RL::HasThreadServiceField, D2RL::ThreadServiceRequiredSize) &
 	      Query(lifecycle, D2RL::HasLifecycleServiceField, D2RL::LifecycleServiceRequiredSize))) {
 		std::snprintf(report, size, "FAILED (an item, inventory, thread or lifecycle service is missing)");
 		return;
 	}
+	sigscan::Entry* const sigs[] = {&d2r::sig::SetUnitStat};  // SetQuantity past 50 (#1763); unresolved: stacks stop at 50
+	sigscan::Resolve(sigs, 1, context->exeBase, nullptr, 0);
 	if (!D2RL::HasItemServiceCapability(g_items, items::ItemServiceCapability::SharedStashWrite)) {
 		std::snprintf(report, size, "FAILED (the item service cannot write the shared stash)");
 		return;

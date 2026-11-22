@@ -34,7 +34,7 @@ them. The mod sets `[d2rcore.stash] add_shared_tabs = 15` (the Pyre Stash Search
 |---|---|
 | 0-4 | D2R's shared tabs |
 | 5-14 | general Loader tabs |
-| 15 | the Maps tab: rows 0-1 under the buttons stay empty; the shown base's maps in rows 2-3; the map currency in columns 0-1 of rows 4-9 and 8-9 of rows 4-8, a fixed cell per item, stacked to 50 |
+| 15 | the Maps tab: rows 0-1 under the buttons stay empty; the shown base's maps in rows 2-3; the map currency in columns 0-1 of rows 4-9 and 8-9 of rows 4-8, a fixed cell per item, stacked to 255 (#1763) |
 | 16, 17, 18 | stored maps of tier 1, 2, 3: one row per base (the order in `plugin/common/stash_home.h`) |
 | 19 | Bossing: PD2's uber maps, keys and ingredients the RotW Materials tab does not take, the Torch Fragment; a fixed cell each (`BossingCell` in `stash_home.h`), stackables merged; a second uber map goes back to the inventory |
 
@@ -50,7 +50,7 @@ moves the item itself (rolls, sockets and quantity stay; the Shift+Right Click s
 (or anywhere on its tier's storage page when the row is full); a currency to its cell, merged into the stack there (the
 merge runs in the inventory: the loader refuses to edit or destroy a shared-stash item; loader 1.3.1 reads quantity 0 for
 PD2's stacks, so the counts are stat 70 read off the native items, #1744); a bossing item to its cell, merged the same way. A
-sum past 50 goes back to the inventory whole. A hand drop onto the cell's stack is merged the same way; see Hand drops. While
+sum past 255 (50 for maps) goes back to the inventory whole. A hand drop onto the cell's stack is merged the same way; see Hand drops. While
 Maps or Bossing is up, a tidy pass (every 25 updates) also routes items put onto those two pages by hand, and moves an item
 no rule takes off them to the inventory. A full cell or page, or a missing page (fewer extra tabs), moves it back to the inventory; the log
 says why. Status: `core-ui` console command, `affinity:` and `stash tabs:` counters.
@@ -67,8 +67,8 @@ Bossing page's stack, and logs `No item found at page: 4` (#1744). So while eith
 onto the stash (grid 4) and queues it for the game thread, which merges the cursor item into the stack through the same
 SDK merge when it is the same stackable item on its own cell of the open page. Log: `stash tabs: stack message 0x21 onto
 page .. cell x,y: the plugin stacks it`, then `affinity: .. merged with the stack ..`. Otherwise, or when a step fails (a
-full inventory), the item stays on the cursor: it is destroyed only after the stack holds the sum. A sum past 50 tops the stack up to 50 and leaves the rest on the cursor item, as D2R's own 0x4c1940 does ([#1758](https://github.com/synpoox/pd2-resurrected/issues/1758)).
-The counts are read first (stat 70 through `editNativeItem`, which also reads a shared-stash item): a stack already at 50 refuses with no move, as D2R's
+full inventory), the item stays on the cursor: it is destroyed only after the stack holds the sum. A sum past 255 tops the stack up to 255 and leaves the rest on the cursor item, as D2R's own 0x4c1940 does ([#1758](https://github.com/synpoox/pd2-resurrected/issues/1758)).
+The counts are read first (stat 70 through `editNativeItem`, which also reads a shared-stash item): a stack already at 255 refuses with no move, as D2R's
 handler refuses that message (0x4f2a80 returns 2 only below the item's maxstack; the refusal only writes telemetry). Before #1758 the
 stack went to the inventory and back first, and the cursor item was left invisible on the client while the server still
 held it (`Insert overlaps with item id .. mode: 4` on the next pick-up). The client sends 0x21 whenever its stack test
@@ -76,6 +76,8 @@ held it (`Insert overlaps with item id .. mode: 4` on the next pick-up). The cli
 cleared by an item packet (0x1c6a40); while pending, the client ignores clicks with it (0x2c81d0 returns on 0x1c7360). A merge's stack move also takes over the client's cursor: the stack's 0x9d action 5 (0x1c60a0) makes it the cursor item (0x389990), so after a top-up the rest was not drawn until a click in the inventory ([#1762](https://github.com/synpoox/pd2-resurrected/issues/1762)). So every consumed 0x21 ends, after the last move, with `ResendCursor`: an `editItem` of the cursor item to its own count, which sends it again (0x9d action 0x15, 0x1c6540: the client rebuilds it as the cursor item). Log: `affinity: cursor item .. sent to the client again: result 0`. Maps stack only when both are normal quality with equal non-quantity stats
 (`StackAllowed`, which shares `MapStatsRefusal` with the tidy pass's `MapRefusal`), so a rare map is never merged into a normal stack. The tidy pass stays as the net for what skips the message (the list forms 0x22 and 0x60 are not checked). Log: `stash tabs:
 refused message 0x.., not the item's own cell`.
+
+Stacks of 255 ([#1763](https://github.com/synpoox/pd2-resurrected/issues/1763)): map currency and boss parts stack to 255 on their cell (`StashMax` in `stash_home.h`); maps keep 50, since `splitStack` remakes a map's stats on the piece it takes out. D2R's GetMaxStack (93847 `0x3719e0`: misc.txt `maxstack` + stat 254, clamped to 511, the 9-bit saved quantity) still caps inventory stacks at 50: pick-up, vendor and merge stacking all test it. Taking a stack out gives 50: a stack past 50 that is new in the inventory (Ctrl+click out, or a hand pick-up put down) has 50 split onto the cursor and the rest is routed home, topping the cell's stack up (the SDK moves no cursor item, so they stay there). `splitStack` refuses a source past its maxstack (result 3), so the stack is set to 2, 1 is split off, and the counts are set to 50 and the rest. `editItem` refuses a count past maxstack too, so a count past 50 is written natively (`SetUnitStat` by signature through `editNativeItem`; the following SDK move publishes it). It runs only while the Maps or Bossing tab is open (a 50 on the cursor out of a panel is dropped by the next click). After the split the source is written first (to the rest), then the piece (to 50). A failed step puts the counts back from what it reads (never an assumed count), warns, and keeps the stack in the inventory; then the two items are read back and must add up to the stack, else an ERROR line names both counts. A busy cursor sends it all home; a failed split, or a rest that cannot go home, stays in the inventory. Display only: a count past 50 written natively reaches the client on the item's next move, so a merge's cursor rest or a top-up rest left in the inventory past 50 shows its old count until it is picked up or moved. Log: `affinity: .. taken out of the stash: 50 to the cursor (split result 0, counts add up)`. A hand pick-up shows the whole stack on the cursor until it is put down. The RotW tabs (Gems, Materials, Runes) stay at 99: D2RCore's slot add (behind a `.maho` thunk) refuses past 99 itself ([#1767](https://github.com/synpoox/pd2-resurrected/issues/1767)).
 
 Shared pages ([#1749](https://github.com/synpoox/pd2-resurrected/issues/1749)): the Maps and Bossing tabs are shared pages,
 whose grid belongs to another unit, so the client does not send 0x18 or 0x1f there. A swap is 0x14 (client `0x2c81d0`, server

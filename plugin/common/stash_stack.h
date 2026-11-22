@@ -7,7 +7,9 @@
 
 namespace pd2::stashstack {
 
-inline constexpr int32_t TabMax = 99;  // D2R's cap: the deposit refuses when the slot's count is not below it
+// D2R's cap: the deposit refuses when the slot's count is not below it. Not raised to 255 (#1763): D2RCore's add (the
+// .maho thunk stash_stacks.cpp wraps) refuses past 99 itself, so a patched check let a deposit lose the items past 99 (Slot5).
+inline constexpr int32_t TabMax = 99;
 
 // How many items a stack of `quantity` is
 constexpr auto Units(int32_t quantity) noexcept -> int32_t {
