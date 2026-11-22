@@ -70,8 +70,9 @@ constexpr auto TouchesCharmRows(const uint8_t* packet, size_t size, RowOf rowOf)
 // The Maps and Bossing tabs (#1726): while one is open (viewPage, its shared page; 0 none), a drop onto the stash that is not the
 // item's own cell is refused. 0x18 puts the cursor item on a free cell (page +13 is 4 for the stash: D2R's handler 0x4bff30
 // clamps it to 0-4); put(id, x, y) says whether the item may go there. 0x1f (0x15 bytes, handler 0x4c0230) swaps the cursor item
-// with a stored one: ids +1 and +5 (either order), page +9 (4 the stash, clamped the same), the cursor item's cell x +0x0d,
-// y +0x11; swap(a, b, x, y) says whether the cursor item may stand there. Any other page (inventory, cube) is not filtered. The page number of a shared tab is not in the message,
+// with a stored one: ids +1 and +5 (either order), page +9 (4 the stash, clamped the same), the stored item's cell +0x0d and the
+// clicked cell +0x11, where the cursor item goes, each packed y << 16 | x (client 0x2c81d0, server 0x4c0230; #1744: read as two
+// plain ints, a same-item drop on its own cell was refused); swap(a, b, x, y) says whether the cursor item may stand there. Any other page (inventory, cube) is not filtered. The page number of a shared tab is not in the message,
 // so the open tab says which page the stash shows.
 template <class Put, class Swap>
 constexpr auto MisplacedOnTab(const uint8_t* packet, size_t size, uint32_t viewPage, Put put, Swap swap) noexcept -> bool {
@@ -84,10 +85,20 @@ constexpr auto MisplacedOnTab(const uint8_t* packet, size_t size, uint32_t viewP
 		       !put(ReadU32(packet + 1), static_cast<int32_t>(ReadU32(packet + 5)), static_cast<int32_t>(ReadU32(packet + 9)));
 	case 0x1f:
 		return size >= 0x15 && ReadU32(packet + 9) == 4 &&
-		       !swap(ReadU32(packet + 1), ReadU32(packet + 5), static_cast<int32_t>(ReadU32(packet + 0x0d)), static_cast<int32_t>(ReadU32(packet + 0x11)));
+		       !swap(ReadU32(packet + 1), ReadU32(packet + 5), static_cast<int32_t>(ReadU32(packet + 0x11) & 0xffff),
+		             static_cast<int32_t>(ReadU32(packet + 0x11) >> 16));
 	default:
 		return false;
 	}
+}
+
+// #1744: 0x21 (0x15 bytes, handler 0x4c1940, sent by the client's click 0x2c81d0 when the items stack) stacks the cursor
+// item (id +1) onto a stored one (id +5); +9 says the whole cursor stack fits, +0x0d is the target's grid (4 the stash,
+// clamped below 5) and +0x11 its cell, packed y << 16 | x. D2R looks the target up by cell (0x472590 -> 0x474220) in the
+// player's current inventory (0x34a360), which does not hold the Maps or Bossing page's stack: it logs "No item found
+// at page: 4" and stacks nothing. So while one of those tabs is open, a stash 0x21 is the plugin's (StackOnto).
+constexpr auto TabStack(const uint8_t* packet, size_t size, uint32_t viewPage) noexcept -> bool {
+	return packet != nullptr && size >= 0x15 && viewPage != 0 && packet[0] == 0x21 && ReadU32(packet + 0x0d) == 4;
 }
 
 // True while the padlock is on (hotkeys.cpp refuses its own moves from the charm rows then).
