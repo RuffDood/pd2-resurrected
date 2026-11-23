@@ -1720,8 +1720,8 @@ constexpr const char* TelekinesisMissileTest =
 constexpr int TelekinesisMissileAt = 15;  // the `lea edx,[rax+0x38]` inside the match
 
 // One MutationService byte patch at `rva`, refused unless the live bytes are `expected`.
-static auto PatchBytes(const D2RL::PluginContext* context, uint64_t rva, const uint8_t* expected, const uint8_t* bytes,
-                       uint32_t size) noexcept -> bool {
+auto PatchBytes(const D2RL::PluginContext* context, uint64_t rva, const uint8_t* expected, const uint8_t* bytes,
+                uint32_t size) noexcept -> bool {
 	const D2RL::MutationService* mutations = nullptr;
 	D2RL::Mutations::TransactionHandle transaction = 0;
 	if (context->QueryService(&mutations) != D2RL::ServiceQueryResult::Success ||
