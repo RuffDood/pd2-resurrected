@@ -10,8 +10,8 @@
 //   amplifydamage on 25% of attacks. The think's one call is redirected (RedirectCall).
 // - 1.13c +0x1e000 jge -> jmp: no 6/128 (12/128 ranged) roll that skips the target search in the think's 0x40-collision
 //   branch. D2R's jc at 0x5bee23 becomes a 2-byte nop (MutationService).
-// Not ported (open questions on #1803): PD2's room guard, its aura restart, its 5% party and pet buffing, and the follow
-// rework (1.13c +0x1deb3, +0x1ded6, +0x1defb, +0x1e0eb, +0x1e11c), whose replacement is not in the think.
+// Not ported: its aura restart and its 5% party and pet buffing (#1925), and the follow
+// rework (1.13c +0x1deb3, +0x1ded6, +0x1defb, +0x1e0eb, +0x1e11c; #1926), whose replacement is not in the think.
 // PD2 keys its rules on its own hireling ids and skill ids; ours are renumbered, so these key on the merc's skills and
 // monstats class. A merc without the skill (a Classic hireling row, another merc type) keeps D2R's think.
 #include "merc_ai.h"
@@ -19,6 +19,7 @@
 #include "hot_log.h"
 #include "item_rules.h"
 #include "log.h"
+#include "monster_count.h"
 #include "pd2_engine.h"
 #include "sig.h"
 #include "sig_hook.h"
@@ -42,6 +43,7 @@ constexpr int32_t StatLevel = 12, StateAmplifyDamage = 9;
 constexpr int32_t BuffRange = 30;                   // PD2: owner closer than 0x1e
 constexpr int32_t WhirlMin = 6, WhirlMax = 19;       // PD2: distance - 6 <= 0xd
 constexpr uint32_t AmpChance = 25;                   // PD2: rand() % 100 < 0x19
+constexpr uint32_t SkInTown = 0x100;                 // skills record +0x24: +0x25 bit 0
 
 using ThinkFn = void (*)(Game*, Unit* merc, uint8_t* tick) noexcept;
 using OwnerFn = Unit* (*)(Unit* merc) noexcept;
@@ -72,13 +74,19 @@ auto HasSkill(Unit* unit, int32_t skill) noexcept -> bool {
 	return d2r::Engine<UnitSkillFn>(d2r::sig::GetUnitSkill)(unit, skill, 0) != nullptr;
 }
 
-// PD2's 0x10356bc0 for its owner and itself. PD2 also skips it in town unless the skill has InTown: Battle Orders has.
+// PD2's 0x10356bc0 for its owner and itself, after its room guard (0x1037f6b0): no cast without a room, nor in town
+// unless the skill has InTown (skills record +0x24 bit 0x100).
 auto BattleOrders(Game* game, Unit* merc, Unit* owner, int32_t* distance) noexcept -> bool {
-	if (owner == nullptr || At<int32_t>(owner, d2r::rva::UnitType) != 0 || !HasSkill(merc, SkillBattleOrders)) {
+	void* room = d2r::Engine<void* (*)(Unit*) noexcept>(d2r::sig::UnitRoom)(merc);
+	if (room == nullptr || owner == nullptr || At<int32_t>(owner, d2r::rva::UnitType) != 0 || !HasSkill(merc, SkillBattleOrders)) {
 		return false;
 	}
 	const uint8_t* skill = d2r::api.getSkillRecord(d2r::DataFlag(game), SkillBattleOrders);
 	if (skill == nullptr || d2r::api.unitStat(merc, StatLevel, 0) < At<uint16_t>(skill, d2r::rva::SkReqLevel)) {
+		return false;
+	}
+	if ((At<uint32_t>(skill, d2r::rva::SkFlags24) & SkInTown) == 0 &&
+	    pd2::monstercount::IsTown(d2r::Engine<int32_t (*)(void*) noexcept>(d2r::sig::RoomLevelId)(room))) {
 		return false;
 	}
 	const int32_t state = At<int16_t>(skill, d2r::rva::SkAuraState);
@@ -153,9 +161,9 @@ constexpr uint8_t SearchRollStock[] = {0x72, 0x74}, SearchRollNop[] = {0x66, 0x9
 
 }  // namespace
 
-sigscan::Entry* const MercAiUses[7] = {&d2r::sig::AiUseSkill,  &d2r::sig::UnitHasState, &d2r::sig::UnitDistance,
+sigscan::Entry* const MercAiUses[9] = {&d2r::sig::AiUseSkill,  &d2r::sig::UnitHasState, &d2r::sig::UnitDistance,
                                        &d2r::sig::GetUnitSkill, &d2r::sig::UnitStat,     &d2r::sig::GetSkillRecord,
-                                       &d2r::sig::RecordOffsets};
+                                       &d2r::sig::RecordOffsets, &d2r::sig::UnitRoom,   &d2r::sig::RoomLevelId};
 
 auto InstallMercAi(const D2RL::PluginContext* context, char* report, size_t reportSize) noexcept -> int {
 	const uint64_t base = context->exeBase;
@@ -173,7 +181,7 @@ auto InstallMercAi(const D2RL::PluginContext* context, char* report, size_t repo
 	const bool redirected = RedirectCall(context, AttackCallPattern, 13, reinterpret_cast<uint64_t>(&MercAttack),
 	                                     reinterpret_cast<uint64_t*>(&g_attackOriginal));
 	const bool patched = sigscan::ScanUnique(base, SearchRollPattern, 10, &roll) == 1 &&
-	                     PatchBytes(context, roll, SearchRollStock, SearchRollNop, sizeof(SearchRollNop));
+	                     context->PatchBytes(roll, SearchRollStock, sizeof(SearchRollStock), SearchRollNop, sizeof(SearchRollNop));
 	plog::Info("merc ai: think hook %s, attack call %s, search roll at 0x%llx %s", hooked ? "on" : "off",
 	           redirected ? "on" : "off", static_cast<unsigned long long>(roll), patched ? "on" : "off");
 	std::snprintf(report, reportSize, "battle orders%s; whirlwind and amp%s; target search%s", hooked ? "" : " FAILED",

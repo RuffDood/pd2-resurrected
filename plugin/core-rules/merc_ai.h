@@ -16,4 +16,4 @@ auto MercAiCount() noexcept -> int;
 // Live counters for the status command.
 auto MercAiCounters(char* out, size_t size) noexcept -> void;
 // The signature entries the part reads.
-extern sigscan::Entry* const MercAiUses[7];
+extern sigscan::Entry* const MercAiUses[9];

@@ -25,10 +25,6 @@ auto ThunkSlotRva(const sigscan::Entry& entry, uint32_t callOffset) noexcept -> 
 auto SwapThunkSlot(const D2RL::PluginContext* context, const sigscan::Entry& entry, uint32_t callOffset, uint64_t wrapper,
                    uint64_t* original) noexcept -> bool;
 
-// One MutationService byte patch at `rva`, refused unless the live bytes are `expected`.
-auto PatchBytes(const D2RL::PluginContext* context, uint64_t rva, const uint8_t* expected, const uint8_t* bytes,
-                uint32_t size) noexcept -> bool;
-
 // Points the E8 call at `callAt` in the one match of `pattern` at a relay page that jumps to `entry`, by a MutationService
 // byte patch with the stock call as expected bytes; the call's old target goes to `original` first.
 auto RedirectCall(const D2RL::PluginContext* context, const char* pattern, uint32_t callAt, uint64_t entry,
